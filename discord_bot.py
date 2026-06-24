@@ -558,8 +558,10 @@ USAGE_CACHE_SEC = 180
 ALLOWED_CHANNEL = int(_require_env("ALLOWED_CHANNEL"))
 ALLOWED_USER    = int(_require_env("ALLOWED_USER"))
 UPDATE_CHANNEL  = int(os.environ.get("UPDATE_CHANNEL") or 0)   # 更新公告推送頻道（選填，0=停用）
-SIDEBAR_CATEGORY = "CC 對話"               # 多 session 側欄的分類容器名
-SIDEBAR_ENTRY    = "➕新對話"              # 側欄最上方的入口頻道名（放常駐按鈕）
+# 側欄分類／入口頻道名稱（選填）。同一個伺服器要跑多個 bot 時，各 bot 設不同的
+# SIDEBAR_CATEGORY 就不會互搶同一個分類（否則兩個 bot 會一起搶「CC 對話」而衝突）。
+SIDEBAR_CATEGORY = os.environ.get("SIDEBAR_CATEGORY") or "CC 對話"   # 多 session 側欄的分類容器名
+SIDEBAR_ENTRY    = os.environ.get("SIDEBAR_ENTRY") or "➕新對話"      # 側欄最上方的入口頻道名（放常駐按鈕）
 FALLBACK_MODEL  = "claude-sonnet-4-6"      # 主模型過載時的備援模型
 # DEFAULT_MODEL 選填：新對話的預設模型。預設用標準 200K context 的 Sonnet，
 # 所有方案都能跑（不需 1M context credits）。若你的方案有 1M credits 想啟用，
