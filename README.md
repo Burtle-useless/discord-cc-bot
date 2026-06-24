@@ -87,6 +87,13 @@ copy .env.example .env
 Then open `.env` and fill in `DISCORD_TOKEN`, `ALLOWED_CHANNEL`, and
 `ALLOWED_USER`. The rest are optional (see comments in the file).
 
+> **Model & context:** by default the bot uses standard 200K context
+> (`claude-sonnet-4-6`), which works on every plan with no usage credits. If you
+> ever see *"Usage credits required for 1M context"*, it means a 1M-context model
+> was selected without credits — the default avoids that. To opt into the 1M
+> window (only if your plan has the credits), set `DEFAULT_MODEL` to a 1M alias
+> such as `claude-sonnet-4-6[1m]` in `.env`.
+
 ---
 
 ## Running

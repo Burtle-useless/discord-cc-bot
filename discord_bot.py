@@ -66,10 +66,15 @@ UPDATE_CHANNEL  = int(os.environ.get("UPDATE_CHANNEL") or 0)   # 更新公告推
 SIDEBAR_CATEGORY = "CC 對話"               # 多 session 側欄的分類容器名
 SIDEBAR_ENTRY    = "➕新對話"              # 側欄最上方的入口頻道名（放常駐按鈕）
 FALLBACK_MODEL  = "claude-sonnet-4-6"      # 主模型過載時的備援模型
+# DEFAULT_MODEL 選填：新對話的預設模型。預設用標準 200K context 的 Sonnet，
+# 所有方案都能跑（不需 1M context credits）。若你的方案有 1M credits 想啟用，
+# 改成對應的 1M 模型別名（例如 claude-sonnet-4-6[1m]），壓縮門檻會自動跟著放大。
+DEFAULT_MODEL   = os.environ.get("DEFAULT_MODEL") or "claude-sonnet-4-6"
 MAX_BUFFER_SIZE = 64 * 1024 * 1024         # stream-json 解析 buffer 上限（64MB）
 RETRY_MAX_ATTEMPTS = 4                       # 529/429 退避重試次數上限
 RETRY_BASE_DELAY   = 1.0                     # 退避基礎秒數
-CONTEXT_WARN_TOKENS = 850_000                # context 接近上限（1M 方案）的自動壓縮門檻
+# context 接近上限的自動壓縮門檻：依預設模型自動判斷——1M 模型→850k、標準 200K→170k
+CONTEXT_WARN_TOKENS = 850_000 if "[1m]" in DEFAULT_MODEL else 170_000
 NOTIFY_AFTER_SEC = 60                        # 任務耗時超過此秒數，完成時 @使用者推播
 INACTIVITY_TIMEOUT = 600                      # CC 連續無任何輸出超過此秒數才視為卡死（不限總時長，長工作流不會被誤殺）
 
@@ -327,7 +332,7 @@ def get_state(cid: int) -> dict:
         _sessions[cid] = {
             "session_id": rec.get("session_id"),
             "cwd": cwd if cwd.is_dir() else DEFAULT_DIR,
-            "model": rec.get("model"),
+            "model": rec.get("model") or DEFAULT_MODEL,
             "effort": rec.get("effort"),
             "_cid": cid,
         }
