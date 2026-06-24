@@ -5,9 +5,9 @@ Windows PC from Discord. Send a message in a Discord channel and the bot runs
 it through the Claude Code CLI on your machine — editing files, running
 commands, searching the web, and more — then streams the result back to you.
 
-> **Heads-up on language:** the bot's replies and built-in prompts are written
-> in **Traditional Chinese**. This README is in English, but the running bot
-> talks to you in Chinese. (Source-code comments are Chinese too.)
+> **Language:** the bot's interface and Claude's replies default to **English**.
+> Set `BOT_LANG=zh-TW` in your `.env` to switch the whole UI (and Claude's
+> replies) to Traditional Chinese. (Source-code comments are in Chinese.)
 
 ---
 
