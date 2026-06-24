@@ -1,0 +1,12 @@
+# ---- Core (required) -------------------------------------------------
+discord.py>=2.7.1
+claude-agent-sdk>=0.1.81
+python-dotenv>=1.2.2
+
+# ---- Optional features (install only if you want them) ---------------
+# /schedule command (cron expression scheduling):
+croniter>=6.2.2
+# Voice-message transcription (local Whisper speech-to-text):
+faster-whisper>=1.2.1
+# PowerPoint -> PDF conversion (Windows only, requires PowerPoint installed):
+pywin32>=312

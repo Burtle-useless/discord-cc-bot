@@ -1,0 +1,23 @@
+# Environment config (contains your token - never commit this)
+.env
+
+# Bot runtime data (generated at runtime, user-specific)
+discord_session.json
+allowed_users.json
+allowed_channels.json
+schedules.json
+session_titles.json
+last_version.json
+
+# Logs
+*.log
+*.err
+logs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Temp
+tmp/

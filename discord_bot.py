@@ -1,0 +1,1927 @@
+"""Discord bot — 本地跑，橋接 Claude Code CLI。"""
+
+import asyncio
+import random
+import traceback
+import json
+import os
+import re
+import time
+import uuid
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional
+
+import discord
+from discord.ext import commands
+from claude_agent_sdk import (
+    ClaudeAgentOptions,
+    ClaudeSDKClient,
+    ResultMessage,
+    AssistantMessage,
+    ToolUseBlock,
+    StreamEvent,
+)
+from claude_agent_sdk._errors import MessageParseError
+from claude_agent_sdk._internal.message_parser import parse_message
+
+try:
+    from croniter import croniter as _croniter
+    _HAS_CRONITER = True
+except ImportError:
+    _HAS_CRONITER = False
+
+# 從 .env 載入設定（沒裝 python-dotenv 時，退而仰賴系統環境變數）
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+# SDK 的 initialize timeout 由此環境變數控制（最低 60s）。健康時 init 僅約 1.2s，
+# 設 60s 讓異常卡死能較快失敗、進入重試，而非乾等 3 分鐘
+os.environ.setdefault("CLAUDE_CODE_STREAM_CLOSE_TIMEOUT", "60000")
+
+# ── 設定（從 .env 讀取，第一次使用請複製 .env.example 為 .env 並填入）───────
+def _require_env(key: str) -> str:
+    """讀取必填環境變數；缺少時拋出清楚的錯誤，引導使用者去設定 .env。"""
+    val = os.environ.get(key)
+    if not val:
+        raise RuntimeError(
+            f"缺少必要環境變數 {key}；請複製 .env.example 為 .env 並填入（詳見 README）"
+        )
+    return val
+
+DISCORD_TOKEN   = _require_env("DISCORD_TOKEN")
+# CLAUDE_CLI 選填，預設指向 npm 全域安裝的 claude.cmd（%APPDATA%\npm\claude.cmd）
+CLAUDE_CLI      = os.environ.get("CLAUDE_CLI") or os.path.expandvars(r"%APPDATA%\npm\claude.cmd")
+# DEFAULT_DIR 選填，預設為使用者家目錄
+DEFAULT_DIR     = Path(os.environ.get("DEFAULT_DIR") or Path.home())
+MAX_MSG        = 1900
+USAGE_CACHE_SEC = 180
+ALLOWED_CHANNEL = int(_require_env("ALLOWED_CHANNEL"))
+ALLOWED_USER    = int(_require_env("ALLOWED_USER"))
+UPDATE_CHANNEL  = int(os.environ.get("UPDATE_CHANNEL") or 0)   # 更新公告推送頻道（選填，0=停用）
+SIDEBAR_CATEGORY = "CC 對話"               # 多 session 側欄的分類容器名
+SIDEBAR_ENTRY    = "➕新對話"              # 側欄最上方的入口頻道名（放常駐按鈕）
+FALLBACK_MODEL  = "claude-sonnet-4-6"      # 主模型過載時的備援模型
+MAX_BUFFER_SIZE = 64 * 1024 * 1024         # stream-json 解析 buffer 上限（64MB）
+RETRY_MAX_ATTEMPTS = 4                       # 529/429 退避重試次數上限
+RETRY_BASE_DELAY   = 1.0                     # 退避基礎秒數
+CONTEXT_WARN_TOKENS = 850_000                # context 接近上限（1M 方案）的自動壓縮門檻
+NOTIFY_AFTER_SEC = 60                        # 任務耗時超過此秒數，完成時 @使用者推播
+INACTIVITY_TIMEOUT = 600                      # CC 連續無任何輸出超過此秒數才視為卡死（不限總時長，長工作流不會被誤殺）
+
+# ── 版本與更新內容 ──────────────────────────────────────────────────────
+BOT_VERSION = "1.17.2"
+CHANGE_TYPE = "fix"
+CHANGELOG = """\
+🔧 **/sessions、/search 改 ephemeral，不留殘留**
+• 對話清單與「已救回」訊息改成只有你看得到，入口頻道不再留下殘留訊息
+"""
+
+_CHANGE_TYPE_LABEL = {
+    "feat":  "✨ 新功能（次版本）",
+    "fix":   "🐛 修正（修訂）",
+    "major": "🚀 重大改版（主版本）",
+}
+
+_VERSION_FILE = Path(__file__).parent / "last_version.json"
+
+def _get_last_version() -> Optional[str]:
+    try:
+        return json.loads(_VERSION_FILE.read_text()).get("version")
+    except Exception:
+        return None
+
+def _save_last_version(v: str) -> None:
+    try:
+        _VERSION_FILE.write_text(json.dumps({"version": v}))
+    except Exception:
+        pass
+
+# 資料檔案放在 bot/ 同目錄下
+_BOT_DIR        = Path(__file__).parent
+_SESSION_FILE   = _BOT_DIR / "discord_session.json"
+_USERS_FILE     = _BOT_DIR / "allowed_users.json"
+_SCHEDULES_FILE = _BOT_DIR / "schedules.json"
+_TITLES_FILE    = _BOT_DIR / "session_titles.json"   # session_id → 自訂/AI 生成的中文標題
+
+# ── 允許使用者持久化 ────────────────────────────────────────────────────
+def _load_allowed_users() -> set[int]:
+    try:
+        data = json.loads(_USERS_FILE.read_text())
+        return {ALLOWED_USER} | set(data)
+    except Exception:
+        return {ALLOWED_USER}
+
+def _save_allowed_users(users: set[int]) -> None:
+    try:
+        _USERS_FILE.write_text(json.dumps(list(users)))
+    except Exception:
+        pass
+
+_allowed_users: set[int] = _load_allowed_users()
+
+# ── 允許頻道持久化（可加開多個頻道並行跑工作）──────────────────────────────
+_CHANNELS_FILE = _BOT_DIR / "allowed_channels.json"
+
+def _load_allowed_channels() -> set[int]:
+    try:
+        return {ALLOWED_CHANNEL} | {int(x) for x in json.loads(_CHANNELS_FILE.read_text())}
+    except Exception:
+        return {ALLOWED_CHANNEL}
+
+def _save_allowed_channels(chs: set[int]) -> None:
+    try:
+        _CHANNELS_FILE.write_text(json.dumps(list(chs)))
+    except Exception:
+        pass
+
+_allowed_channels: set[int] = _load_allowed_channels()
+
+# ── 排程持久化 ──────────────────────────────────────────────────────────
+def _load_schedules() -> list[dict]:
+    try:
+        return json.loads(_SCHEDULES_FILE.read_text())
+    except Exception:
+        return []
+
+def _save_schedules(schedules: list[dict]) -> None:
+    try:
+        _SCHEDULES_FILE.write_text(json.dumps(schedules, ensure_ascii=False, indent=2))
+    except Exception:
+        pass
+
+# ── 錯誤分類 ────────────────────────────────────────────────────────────
+def classify_cc_error(err: str) -> str:
+    s = err.lower()
+    if "exceeded maximum buffer size" in s or "failed to decode json" in s:
+        return "INPUT_TOO_LARGE"
+    if "prompt is too long" in s or ("400" in s and "too long" in s):
+        return "CONTEXT_FULL"
+    if "529" in s or "overloaded" in s:
+        return "OVERLOADED"
+    if "429" in s or "rate_limit" in s or "rate limit" in s:
+        return "RATE_LIMIT"
+    if "failed to start claude" in s or "winerror 267" in s or "目錄名稱無效" in s:
+        return "STARTUP"
+    if "401" in s or "credential" in s or "authentication" in s or "unauthorized" in s:
+        return "AUTH"
+    if "control request timeout" in s or "initialize" in s:
+        return "INIT_TIMEOUT"
+    return "UNKNOWN"
+
+USER_FACING = {
+    "INPUT_TOO_LARGE": "📥 輸入太大超過處理上限，請拆小內容或改用純文字。",
+    "CONTEXT_FULL":    "📦 對話太長了（context 已滿），請用 /new 開新對話。",
+    "OVERLOADED":      "⚠️ Anthropic 服務暫時過載，已自動重試／切換備援模型仍未成功，請稍候再試。",
+    "RATE_LIMIT":      "⏳ 觸發速率限制，稍等一下再試。",
+    "AUTH":            "🔑 認證出問題了，需要人工檢查。",
+    "STARTUP":         "📁 CC 啟動失敗（多為工作目錄無效），已退回預設目錄，請重試或用 /cd 切換。",
+    "TIMEOUT":         "⏱️ CC 連續 10 分鐘沒有任何輸出，已視為卡住中止（長度本身不再受限）。可直接重試或拆小任務。",
+    "INIT_TIMEOUT":    "⏱️ CC 初始化超時，請再試一次。",
+    "UNKNOWN":         "❌ 發生未預期錯誤，已記錄 log。",
+}
+
+_RETRYABLE    = {"OVERLOADED", "RATE_LIMIT", "INIT_TIMEOUT"}
+_RESET_SESSION = {"CONTEXT_FULL"}
+
+
+class CCError(Exception):
+    """已分類的 CC 錯誤，帶 kind 與給使用者看的訊息。"""
+    def __init__(self, kind: str, raw: str):
+        self.kind = kind
+        self.raw = raw
+        self.user_msg = USER_FACING.get(kind, USER_FACING["UNKNOWN"])
+        super().__init__(f"{kind}: {raw[:200]}")
+
+
+# ── Anthropic 平台 incident 偵測 ────────────────────────────────────────
+_incident_cache: dict = {}
+_INCIDENT_CACHE_SEC = 120
+
+def is_incident_active() -> Optional[str]:
+    now = time.time()
+    if "ts" in _incident_cache and now - _incident_cache["ts"] < _INCIDENT_CACHE_SEC:
+        return _incident_cache.get("title")
+    title = None
+    try:
+        req = urllib.request.Request(
+            "https://status.claude.com/history.atom",
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as r:
+            raw = r.read().decode("utf-8", errors="replace")
+        entries = re.findall(r"<entry>(.*?)</entry>", raw, re.DOTALL)[:5]
+        for e in entries:
+            m = re.search(r"<title[^>]*>(.*?)</title>", e, re.DOTALL)
+            t = (m.group(1) if m else "").strip()
+            body = e.lower()
+            if t and "resolved" not in body and any(
+                k in body for k in ("elevated", "outage", "degraded", "error")
+            ):
+                title = t
+                break
+    except Exception as ex:
+        print(f"[STATUS_CHECK] failed: {ex}", flush=True)
+    _incident_cache["ts"] = now
+    _incident_cache["title"] = title
+    return title
+
+# ── Session 持久化（per-channel，兩個頻道各記各的，不互相覆蓋）──────────────
+def _load_sessions_map() -> dict:
+    try:
+        d = json.loads(_SESSION_FILE.read_text(encoding="utf-8"))
+        # 相容舊格式 {"session_id": x} → 遷移到主頻道
+        if "session_id" in d:
+            return {str(ALLOWED_CHANNEL): d["session_id"]}
+        return d
+    except Exception:
+        return {}
+
+def _persist_session(state: dict) -> None:
+    cid = state.get("_cid")
+    if cid is None:
+        return
+    try:
+        data = _load_sessions_map()
+        # 整包存：session_id + model/effort/cwd，重啟後設定不會變回預設
+        data[str(cid)] = {
+            "session_id": state.get("session_id"),
+            "model": state.get("model"),
+            "effort": state.get("effort"),
+            "cwd": str(state.get("cwd") or DEFAULT_DIR),
+        }
+        _SESSION_FILE.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+_sessions: dict[int, dict] = {}
+
+_processing: dict[int, bool] = {}
+_running_tasks: dict[int, "asyncio.Task"] = {}
+
+
+class _StoppedByUser(Exception):
+    """使用者透過 /stop 主動中止工作。"""
+
+
+_MILESTONE_RE = re.compile(r'\[\[MILESTONE:\s*(.+?)\]\]')
+
+
+async def _run_tracked(
+    channel_id: int,
+    prompt: str,
+    state: dict,
+    progress_msg: Optional[discord.Message],
+) -> tuple[str, Optional[str], Optional[dict]]:
+    """把 run_claude 包成可取消的 task，登記到 _running_tasks 供 /stop 使用。"""
+    last_kind = "UNKNOWN"
+    last_raw = ""
+    for attempt in range(RETRY_MAX_ATTEMPTS):
+        task = asyncio.create_task(run_claude(prompt, state, progress_msg))
+        _running_tasks[channel_id] = task
+        try:
+            return await task
+        except asyncio.CancelledError:
+            raise _StoppedByUser()
+        except (asyncio.TimeoutError, TimeoutError):
+            raise CCError("TIMEOUT", "inactivity timeout（連續無輸出）")
+        except Exception as e:
+            raw = str(e).strip() or f"{type(e).__name__}（無訊息）"
+            tb = traceback.format_exc()
+            kind = classify_cc_error(raw + " " + tb)
+            last_kind, last_raw = kind, raw
+            print(f"[CC_FAIL] kind={kind} attempt={attempt+1}/{RETRY_MAX_ATTEMPTS} "
+                  f"type={type(e).__name__} raw={raw!r}\n{tb}", flush=True)
+            if kind not in _RETRYABLE:
+                raise CCError(kind, raw)
+            if attempt < RETRY_MAX_ATTEMPTS - 1:
+                # INIT_TIMEOUT：前一個 CC 進程可能還沒釋放資源，多等 3 秒
+                extra = 10.0 if kind == "INIT_TIMEOUT" else 0.0
+                delay = RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.5) + extra
+                if progress_msg:
+                    try:
+                        await progress_msg.edit(
+                            content=f"⚠️ **{kind}**，{delay:.0f}s 後自動重試"
+                                    f"（{attempt+1}/{RETRY_MAX_ATTEMPTS}）...")
+                    except Exception:
+                        pass
+                await asyncio.sleep(delay)
+        finally:
+            _running_tasks.pop(channel_id, None)
+    raise CCError(last_kind, last_raw)
+
+# ── 每個 channel 的 session 狀態 ──────────────────────────────────────
+_usage_cache: dict = {}
+
+def get_state(cid: int) -> dict:
+    if cid not in _sessions:
+        rec = _load_sessions_map().get(str(cid))
+        if isinstance(rec, str):      # 舊格式：值只是 session_id 字串
+            rec = {"session_id": rec}
+        rec = rec or {}
+        cwd = Path(rec.get("cwd")) if rec.get("cwd") else DEFAULT_DIR
+        _sessions[cid] = {
+            "session_id": rec.get("session_id"),
+            "cwd": cwd if cwd.is_dir() else DEFAULT_DIR,
+            "model": rec.get("model"),
+            "effort": rec.get("effort"),
+            "_cid": cid,
+        }
+    return _sessions[cid]
+
+def _resolve_project_dir(project_path: str) -> tuple[Path, bool]:
+    """回傳 (可用目錄, 是否為原路徑)。原路徑不存在時退回預設目錄。"""
+    p = Path(project_path)
+    if p.is_dir():
+        return p, True
+    return DEFAULT_DIR, False
+
+# ── 工具圖示 ───────────────────────────────────────────────────────────
+_ICONS = {
+    "Read":"📖","Write":"✏️","Edit":"✏️","MultiEdit":"✏️",
+    "Bash":"⚙️","PowerShell":"⚙️","Glob":"🔍","Grep":"🔍",
+    "WebSearch":"🌐","WebFetch":"🌐","TodoWrite":"📝",
+    "Agent":"🤖","Task":"📋","ToolSearch":"🛠️",
+    "TaskCreate":"📋","TaskUpdate":"📋","TaskList":"📋",
+    "AskUserQuestion":"❓",
+}
+
+def _fmt_tool(name: str, inp: dict) -> str:
+    icon = _ICONS.get(name, "🔧")
+    if name in ("Read","Write","Edit","Glob") and "file_path" in inp:
+        detail = Path(inp["file_path"]).name
+    elif name in ("Bash","PowerShell") and "command" in inp:
+        detail = inp["command"][:60].replace("\n"," ")
+    elif name == "Grep" and "pattern" in inp:
+        detail = inp["pattern"][:50]
+    elif name == "WebSearch" and "query" in inp:
+        detail = inp["query"][:60]
+    else:
+        detail = str(list(inp.values())[0])[:60] if inp else ""
+    return f"{icon} **{name}**  `{detail}`" if detail else f"{icon} **{name}**"
+
+# ── 讀 session 中繼資料 ──────────────────────────────────────────────────
+# discord bot 在每則 prompt 前加的 [名字]: 標記，用來辨識「本 bot 自己的對話」，
+# 把桌面版 CC、其他專案（如 emoji bot）的 session 濾掉，不混在同一層
+_BOT_PROMPT_RE = re.compile(r'^\[.+?\]:\s')
+
+def _session_meta(jf: Path, full: bool = False) -> dict:
+    """讀 session jsonl，回傳 {is_bot, title, first_prompt, cwd}。
+    full=False（預設）：非 bot session 讀到第一句就提前結束以省時（給「我的對話」用）。
+    full=True：讀完整檔以取得標題（給「電腦上全部」用，非 bot session 標題在後面）。"""
+    title, first_prompt, cwd, is_bot = "", "", "", False
+    try:
+        with jf.open("r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if '"aiTitle"' in line:
+                    try:
+                        t = json.loads(line).get("aiTitle")
+                        if t:
+                            title = t
+                    except Exception:
+                        pass
+                    continue
+                if '"type":"user"' in line and not first_prompt:
+                    try:
+                        o = json.loads(line)
+                        cwd = o.get("cwd", "") or cwd
+                        content = o.get("message", {}).get("content")
+                        if isinstance(content, str):
+                            raw = content
+                        elif isinstance(content, list):
+                            raw = next((b.get("text", "") for b in content
+                                        if isinstance(b, dict) and b.get("type") == "text"), "")
+                        else:
+                            raw = ""
+                        raw = raw.strip()
+                        is_bot = bool(_BOT_PROMPT_RE.match(raw))
+                        first_prompt = _BOT_PROMPT_RE.sub("", raw)  # 去掉 [名字]: 前綴給顯示
+                    except Exception:
+                        pass
+                    if not is_bot and not full:
+                        break  # 非 bot session 且非完整模式，不用再往下讀
+    except Exception:
+        pass
+    return {"is_bot": is_bot, "title": title, "first_prompt": first_prompt, "cwd": cwd}
+
+# ── 中文標題快取（讀內容生成、可手動重命名）────────────────────────────────
+def _load_titles() -> dict:
+    try:
+        return json.loads(_TITLES_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+def _save_title(session_id: str, title: str) -> None:
+    try:
+        data = _load_titles()
+        data[session_id] = title
+        _TITLES_FILE.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+def _read_session_text(session_id: str, max_chars: int = 3000) -> str:
+    """讀出 session 的對話文字（使用者+助理），供生成標題用。"""
+    claude_home = Path.home() / ".claude" / "projects"
+    parts: list[str] = []
+    for jf in claude_home.glob(f"*/{session_id}.jsonl"):
+        try:
+            with jf.open("r", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    if '"type":"user"' not in line and '"type":"assistant"' not in line:
+                        continue
+                    try:
+                        o = json.loads(line)
+                    except Exception:
+                        continue
+                    content = o.get("message", {}).get("content")
+                    if isinstance(content, str):
+                        txt = content
+                    elif isinstance(content, list):
+                        txt = " ".join(b.get("text", "") for b in content
+                                       if isinstance(b, dict) and b.get("type") == "text")
+                    else:
+                        txt = ""
+                    txt = _BOT_PROMPT_RE.sub("", txt.strip())
+                    if txt:
+                        parts.append(txt)
+                    if sum(len(p) for p in parts) > max_chars:
+                        break
+        except Exception:
+            pass
+        break
+    return "\n".join(parts)[:max_chars]
+
+async def _ask_haiku(prompt: str) -> str:
+    """一次性、不留 session 檔的 Haiku 呼叫（給生成標題用）。"""
+    opts = ClaudeAgentOptions(
+        cwd=str(DEFAULT_DIR),
+        cli_path=CLAUDE_CLI,
+        model="claude-haiku-4-5-20251001",
+        permission_mode="bypassPermissions",
+        extra_args={"no-session-persistence": None},  # 不寫 session 檔，避免污染
+    )
+    out = ""
+    async with ClaudeSDKClient(opts) as c:
+        await c.query(prompt)
+        async for raw in c._query.receive_messages():
+            try:
+                msg = parse_message(raw)
+            except MessageParseError:
+                continue
+            if isinstance(msg, ResultMessage):
+                out = msg.result or ""
+                break
+    return out.strip()
+
+async def _generate_title(session_id: str) -> Optional[str]:
+    """讀 session 內容，用 Haiku 生成一個貼切的繁體中文短標題。"""
+    text = _read_session_text(session_id)
+    if not text:
+        return None
+    raw = await _ask_haiku(
+        "根據以下對話內容，下一個精準貼切、能代表整段對話主題的繁體中文標題。"
+        "限 15 個字以內，只輸出標題本身，不要引號、不要句號、不要任何解釋：\n\n" + text)
+    title = (raw or "").strip().splitlines()[0] if raw else ""
+    title = title.strip('「」"\'*#＊ 　')[:25]   # 去掉引號、markdown 符號、前後空白
+    return title or None
+
+def _list_sessions(scope: str = "mine", limit: int = 15) -> list[dict]:
+    """掃所有專案列出 session，依時間新到舊。
+    scope="mine"：只回本 bot 自己的對話；scope="all"：電腦上所有對話（含桌面版）。"""
+    claude_home = Path.home() / ".claude" / "projects"
+    if not claude_home.exists():
+        return []
+    full = (scope == "all")
+    titles = _load_titles()
+    entries: list[dict] = []
+    for proj_dir in claude_home.iterdir():
+        if not proj_dir.is_dir():
+            continue
+        for jf in proj_dir.glob("*.jsonl"):
+            meta = _session_meta(jf, full=full)
+            if scope == "mine" and not meta["is_bot"]:
+                continue
+            entries.append({
+                "session_id": jf.stem,
+                "project_path": meta["cwd"] or str(DEFAULT_DIR),
+                "mtime": jf.stat().st_mtime,
+                # 優先用快取的中文標題（手動或讀內容生成的）
+                "title": titles.get(jf.stem) or meta["title"],
+                "first_prompt": meta["first_prompt"],
+            })
+    return sorted(entries, key=lambda e: e["mtime"], reverse=True)[:limit]
+
+def _session_label(session_id: Optional[str]) -> str:
+    """由 session_id 找出該對話的標題（優先用快取中文標題），給狀態顯示用。"""
+    if not session_id:
+        return "🆕 新對話"
+    cached = _load_titles().get(session_id)
+    if cached:
+        return cached[:60]
+    claude_home = Path.home() / ".claude" / "projects"
+    for jf in claude_home.glob(f"*/{session_id}.jsonl"):
+        meta = _session_meta(jf)
+        label = meta["title"] or meta["first_prompt"]
+        return label[:60] if label else f"對話 {session_id[:8]}"
+    return f"對話 {session_id[:8]}"
+
+# ── Claude 執行 ────────────────────────────────────────────────────────
+async def run_claude(
+    prompt: str,
+    state: dict,
+    progress_msg: Optional[discord.Message] = None,
+) -> tuple[str, Optional[str], Optional[dict]]:
+    """回傳 (content, new_session_id, ask_question_data)"""
+    # cwd 防護：切換歷史 session 可能帶入不存在的目錄（WinError 267），退回預設目錄
+    if not Path(state["cwd"]).is_dir():
+        state["cwd"] = DEFAULT_DIR
+    options = ClaudeAgentOptions(
+        cwd=str(state["cwd"]),
+        cli_path=CLAUDE_CLI,
+        model=state.get("model"),
+        effort=state.get("effort"),
+        permission_mode="bypassPermissions",
+        fallback_model=FALLBACK_MODEL,
+        max_buffer_size=MAX_BUFFER_SIZE,
+        # 注意：此 system_prompt 會透過管線傳給 CC 子進程。實測在 Windows 上，
+        # 內含 LaTeX 錢字號、反引號、或無法用系統編碼表示的 Unicode 數學符號時，
+        # 會讓 init 的控制訊息損毀，導致 Control request timeout: initialize 卡死 60s。
+        # 因此這裡一律「用文字描述規則」，不嵌入這些危險字元本身。
+        system_prompt=(
+            "你是透過 Discord bot 被呼叫的 Claude Code。"
+            "使用者透過 Discord 控制這台 Windows 電腦上的檔案和程式。"
+            "所有回覆使用繁體中文。"
+            "【環境】這是 Windows。檔案操作與執行指令優先使用 PowerShell 工具；"
+            "若要用 Bash 工具，路徑一律改用正斜線或用引號包住，"
+            "因為 Windows 的反斜線路徑在 bash 會被當跳脫字元吃掉而失敗。"
+            "【多人對話】訊息可能以方括號使用者名稱開頭，代表不同的人在說話。"
+            "請據此識別誰在問什麼，保持對話對象的一致性。"
+            "【格式規範】Discord 不支援 LaTeX，請勿輸出 LaTeX 數學語法"
+            "（不要用錢字號 dollar 包住算式）。數學式請用純文字與常見符號書寫，"
+            "例如散度寫成 div、希臘字母直接拼出（sigma、tau、theta）、"
+            "平方寫成 ^2、分數寫成 a/b、向量用粗體或加箭頭文字，讓 Discord 能正常顯示。"
+            "程式碼請用 Markdown 的三個反引號程式碼區塊包住，一般文字保持簡潔，不用 HTML 標籤。"
+            "AskUserQuestion 工具已與 Discord 整合：你呼叫它之後，"
+            "bot 會自動把選項轉成 Discord 按鈕顯示給使用者，使用者點選後答案會作為下一則訊息傳回給你。"
+            "重要：呼叫 AskUserQuestion 後，不要輸出任何額外文字，也不要假設工具失敗，直接等待使用者的回應即可。"
+            "提問紀律（重要）：在 Discord 上問問題成本高，務必聚焦——"
+            "每次最多問 1~2 題，問題必須緊扣使用者原始需求，不要發散或歪題；"
+            "整個任務累積追問不要超過 4~5 輪，蒐集到足夠資訊就停止提問、直接動手或給結論。"
+            "若使用者要你把檔案傳給他，只要在回覆中輸出檔案標記，格式嚴格如下（方括號照打）："
+            "[[FILE: 檔案的絕對路徑]]，"
+            "bot 會自動把該檔案上傳到 Discord。可一次輸出多個標記傳多個檔案。"
+            "【記憶誠實】長對話的歷史會被自動壓縮，你可能對自己稍早做過的改動沒有印象。"
+            "看到專案裡你不記得的程式碼時，不要斷言是別的 session 做的、或不是你做的；"
+            "先用 git log、檔案修改時間、或壓縮摘要查證，查不到就如實說無法確定是否為你先前所做，絕不杜撰來源。"
+        ),
+    )
+    if state.get("session_id"):
+        options.resume = state["session_id"]
+    # 開啟逐字串流，讓生成中的回應能即時顯示在「思考中」訊息，提供存活訊號
+    options.include_partial_messages = True
+
+    tool_log: list[str] = []
+    tool_count: int = 0
+    start = time.time()
+    pending_question: dict = {}
+    live_text: str = ""  # 生成中累積的回應文字（給動畫即時顯示）
+    last_activity = [time.time()]  # CC 最後一次有輸出的時間（閒置逾時判斷用）
+
+    async def on_stream(upd) -> None:
+        nonlocal pending_question, tool_count
+        if getattr(upd, "tool_calls", None):
+            for tc in upd.tool_calls:
+                name = tc.get("name", "?")
+                inp = tc.get("input", {})
+                if name == "AskUserQuestion":
+                    pending_question = inp
+                tool_log.append(_fmt_tool(name, inp))
+                tool_count += 1
+        if getattr(upd, "type","") == "assistant" and getattr(upd, "content", None):
+            text = upd.content
+            line = text.strip().split("\n",1)[0][:100]
+            if line and not line.startswith("["):
+                tool_log.append(f"💭 {line}")
+
+    _spinner = ["🌑","🌒","🌓","🌔","🌕","🌖","🌗","🌘"]
+
+    async def _animate() -> None:
+        i = 0
+        while True:
+            await asyncio.sleep(1.5)
+            if not progress_msg:
+                continue
+            elapsed = int(time.time() - start)
+            body = "\n".join(tool_log[-6:])
+            # 生成階段：顯示回應字數 + 即時文字尾段，作為「還活著」的存活訊號
+            if live_text:
+                tail = live_text[-220:].replace("\n", " ")
+                body += f"\n\n✍️ 生成中 `{len(live_text)} 字`\n> {tail}"
+            icon = _spinner[i % len(_spinner)]
+            i += 1
+            # 頂部顯示目前 session + 模型/思考程度，工作時一眼掌握在哪個對話、用什麼設定
+            if state.get("_session_label"):
+                _m = state.get("model")
+                _ms = _m.replace("claude-", "") if _m else "預設"
+                _eff = state.get("effort") or "預設"
+                hdr = f"💬 `{state['_session_label']}`　🧠 `{_ms}·{_eff}`\n"
+            else:
+                hdr = ""
+            try:
+                await progress_msg.edit(content=f"{hdr}{icon} **思考中** `{elapsed}s`\n{body}"[:1990])
+            except Exception:
+                pass
+
+    messages = []
+
+    async def _run_client() -> None:
+        nonlocal live_text
+        try:
+            async with ClaudeSDKClient(options) as client:
+                await client.query(prompt)
+                async for raw_data in client._query.receive_messages():
+                    last_activity[0] = time.time()  # 有任何訊息=還活著，重置閒置計時
+                    try:
+                        message = parse_message(raw_data)
+                    except MessageParseError:
+                        continue
+                    # 逐字串流：累積生成中的回應文字供動畫顯示
+                    if isinstance(message, StreamEvent):
+                        ev = message.event or {}
+                        if ev.get("type") == "content_block_delta":
+                            delta = ev.get("delta", {})
+                            if delta.get("type") == "text_delta":
+                                live_text += delta.get("text", "")
+                        continue
+                    messages.append(message)
+                    if isinstance(message, ResultMessage):
+                        break
+                    if isinstance(message, AssistantMessage):
+                        content = getattr(message, "content", [])
+                        tc_list, text_parts = [], []
+                        if isinstance(content, list):
+                            for block in content:
+                                if isinstance(block, ToolUseBlock):
+                                    tc_list.append({"name": block.name, "input": getattr(block,"input",{})})
+                                elif hasattr(block, "text"):
+                                    text_parts.append(block.text)
+                        class _U:
+                            def __init__(self,**kw): self.__dict__.update(kw)
+                        if tc_list:    await on_stream(_U(type="tool",      tool_calls=tc_list,  content=None))
+                        if text_parts: await on_stream(_U(type="assistant", content="\n".join(text_parts), tool_calls=None))
+        except Exception:
+            raise
+
+    anim_task = asyncio.create_task(_animate()) if progress_msg else None
+    client_task = asyncio.create_task(_run_client())
+    try:
+        # 閒置逾時：不限總時長，只在「連續無輸出」超過門檻才視為卡死，
+        # 讓長工作流（只要持續有輸出）能像桌面版一樣一直跑下去
+        while not client_task.done():
+            await asyncio.sleep(5)
+            if time.time() - last_activity[0] > INACTIVITY_TIMEOUT:
+                raise asyncio.TimeoutError()
+        await client_task  # 完成：取回結果或重新拋出 _run_client 內的例外
+    finally:
+        if not client_task.done():
+            client_task.cancel()
+            try:
+                await client_task
+            except BaseException:
+                pass
+        if anim_task:
+            anim_task.cancel()
+
+    content, new_sid = "", None
+    for m in messages:
+        if isinstance(m, ResultMessage):
+            content = m.result or ""
+            new_sid = m.session_id or new_sid
+            usage = getattr(m, "usage", None) or {}
+            ctx = (usage.get("input_tokens", 0)
+                   + usage.get("cache_read_input_tokens", 0)
+                   + usage.get("cache_creation_input_tokens", 0))
+            if ctx:
+                state["ctx_tokens"] = ctx
+        elif isinstance(m, AssistantMessage) and not content:
+            for block in m.content:
+                if hasattr(block, "text"): content += block.text
+
+    # 清除 [[MILESTONE:...]] 標記、ThinkingBlock 殘留
+    content = _MILESTONE_RE.sub("", content)
+    content = re.sub(r'\[ThinkingBlock\(thinking=.*?\)\]', '', content, flags=re.DOTALL).strip()
+    return content or "（無回應）", new_sid, pending_question or None
+
+# ── [[FILE:路徑]] 標記並上傳檔案 ─────────────────────────────────────────
+_FILE_MARKER = re.compile(r"\[\[FILE:\s*(.+?)\s*\]\]")
+_DISCORD_FILE_LIMIT = 25 * 1024 * 1024
+
+# ── 螢幕截圖（手機遠端看電腦畫面）──────────────────────────────────────
+def _capture_screenshot_sync() -> Optional[Path]:
+    """截取整個虛擬螢幕（含多螢幕）成 PNG，回傳路徑；失敗回 None。"""
+    import subprocess
+    import tempfile
+    out = Path(tempfile.gettempdir()) / f"cc_shot_{uuid.uuid4().hex[:8]}.png"
+    ps = (
+        "Add-Type -AssemblyName System.Windows.Forms,System.Drawing;"
+        "$vs=[System.Windows.Forms.SystemInformation]::VirtualScreen;"
+        "$bmp=New-Object System.Drawing.Bitmap $vs.Width,$vs.Height;"
+        "$g=[System.Drawing.Graphics]::FromImage($bmp);"
+        "$g.CopyFromScreen($vs.X,$vs.Y,0,0,$bmp.Size);"
+        f"$bmp.Save('{out}',[System.Drawing.Imaging.ImageFormat]::Png);"
+        "$g.Dispose();$bmp.Dispose()"
+    )
+    try:
+        subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                       capture_output=True, timeout=30)
+        return out if out.exists() and out.stat().st_size > 0 else None
+    except Exception:
+        return None
+
+async def _capture_screenshot() -> Optional[Path]:
+    return await asyncio.to_thread(_capture_screenshot_sync)
+
+# ── 語音轉文字（faster-whisper，本機 GPU，開車用）────────────────────────
+_whisper_model = None  # 單例，只載入一次
+
+def _get_whisper():
+    """延遲載入 Whisper 模型（單例）；首次會下載 large-v3 並載入 GPU。GPU 起不來自動退 CPU。"""
+    global _whisper_model
+    if _whisper_model is None:
+        import importlib
+        # 把 nvidia cuda_runtime/cuBLAS/cuDNN/nvrtc 的 DLL 目錄加進 PATH，
+        # 否則 GPU 轉錄時 ctranslate2 會找不到 cublas64_12.dll（它走 PATH，不吃 add_dll_directory）
+        _dirs = []
+        for pkg in ("nvidia.cuda_runtime", "nvidia.cublas", "nvidia.cudnn", "nvidia.cuda_nvrtc"):
+            try:
+                mod = importlib.import_module(pkg)
+                bindir = Path(mod.__path__[0]) / "bin"
+                if bindir.is_dir():
+                    _dirs.append(str(bindir))
+            except Exception:
+                pass
+        if _dirs:
+            os.environ["PATH"] = os.pathsep.join(_dirs) + os.pathsep + os.environ.get("PATH", "")
+        from faster_whisper import WhisperModel
+        try:
+            # 8GB VRAM 跑 large-v3 float16 綽綽有餘
+            _whisper_model = WhisperModel("large-v3", device="cuda", compute_type="float16")
+            print("[WHISPER] large-v3 已載入 GPU", flush=True)
+        except Exception as e:
+            print(f"[WHISPER] GPU 失敗，改用 CPU：{e}", flush=True)
+            _whisper_model = WhisperModel("large-v3", device="cpu", compute_type="int8")
+    return _whisper_model
+
+def _transcribe(path: str) -> str:
+    """把音檔轉成文字（阻塞式，呼叫端要用 asyncio.to_thread 包起來）。"""
+    model = _get_whisper()
+    # 不鎖語言（自動偵測，相容中英混講）；initial_prompt 偏向繁體中文
+    segments, _info = model.transcribe(path, beam_size=5, initial_prompt="以下是繁體中文的語音。")
+    return "".join(seg.text for seg in segments).strip()
+
+# ── 簡報轉 PDF（簡報是視覺導向，轉 PDF 讓 CC 逐頁視覺讀取更準）────────────
+def _pptx_to_pdf_sync(src: Path) -> Optional[Path]:
+    """用 PowerPoint COM 把 .ppt/.pptx 轉成同名 .pdf；失敗回傳 None。"""
+    import pythoncom
+    import win32com.client
+    pdf = src.with_suffix(".pdf")
+    pythoncom.CoInitialize()
+    pp = None
+    try:
+        pp = win32com.client.Dispatch("PowerPoint.Application")
+        # PowerPoint 不允許 Visible=False，改用 WithWindow=False 開啟簡報不顯示視窗
+        deck = pp.Presentations.Open(str(src), WithWindow=False)
+        deck.SaveAs(str(pdf), 32)  # 32 = ppSaveAsPDF
+        deck.Close()
+        return pdf if pdf.exists() else None
+    except Exception as e:
+        print(f"[PPTX2PDF] 轉檔失敗 {src.name}: {e}", flush=True)
+        return None
+    finally:
+        try:
+            if pp is not None:
+                pp.Quit()
+        except Exception:
+            pass
+        pythoncom.CoUninitialize()
+
+async def _convert_pptx(src: Path) -> Optional[Path]:
+    """非同步轉檔，加 60s timeout；卡住或失敗回傳 None。"""
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(_pptx_to_pdf_sync, src), timeout=60)
+    except Exception:
+        return None
+
+async def _maybe_auto_compact(channel: discord.TextChannel, state: dict) -> None:
+    """context 達到門檻時自動執行 /compact，避免 CONTEXT_FULL。"""
+    if state.get("ctx_tokens", 0) < CONTEXT_WARN_TOKENS:
+        return
+    msg = await channel.send("🗜️ **上下文接近上限，正在自動壓縮...**")
+    try:
+        _, compact_sid, _ = await run_claude(
+            "/compact 壓縮時務必完整保留：本次對話實際完成的改動"
+            "（檔案路徑、新增或修改的函式與指令與欄位名稱）、版本號變動、尚未完成的待辦。"
+            "做了什麼比討論了什麼更重要，不可省略。",
+            state,
+        )
+        if compact_sid:
+            state["session_id"] = compact_sid
+            _persist_session(state)
+        state["ctx_tokens"] = 0
+        state["ctx_warned"] = False
+        await msg.edit(content="🗜️ 上下文已自動壓縮，繼續處理中...")
+        await asyncio.sleep(1.5)
+        await msg.delete()
+    except Exception as e:
+        await msg.edit(content=f"⚠️ 自動壓縮失敗（{e}），繼續原始回覆...")
+
+async def _send_files_and_text(channel, text: str) -> None:
+    paths = _FILE_MARKER.findall(text)
+    clean = _FILE_MARKER.sub("", text).strip()
+
+    if clean:
+        await send_long(channel, clean)
+
+    for p in paths:
+        fp = Path(p.strip().strip('"').strip("'"))
+        if not fp.exists() or not fp.is_file():
+            await channel.send(f"⚠️ 找不到檔案：`{fp}`")
+            continue
+        if fp.stat().st_size > _DISCORD_FILE_LIMIT:
+            await channel.send(f"⚠️ 檔案太大無法上傳（>25MB）：`{fp.name}`\n路徑：`{fp}`")
+            continue
+        try:
+            await channel.send(file=discord.File(str(fp)))
+        except Exception as e:
+            await channel.send(f"⚠️ 上傳失敗 `{fp.name}`：{e}")
+
+# ── 分段送訊息 ─────────────────────────────────────────────────────────
+async def send_long(channel, text: str):
+    # 超長回覆（會被切成 4 則以上）改存成 Markdown 檔 + 簡短預覽，手機上好讀又能存檔
+    if len(text) > 3 * MAX_MSG:
+        import tempfile
+        fp = Path(tempfile.gettempdir()) / f"cc_reply_{uuid.uuid4().hex[:8]}.md"
+        try:
+            fp.write_text(text, encoding="utf-8")
+            preview = text[:1500].rstrip()
+            await channel.send(f"{preview}\n\n…（內容較長，完整版見附件 📄）",
+                               file=discord.File(str(fp)))
+        finally:
+            try:
+                fp.unlink()
+            except Exception:
+                pass
+        return
+    for i in range(0, len(text), MAX_MSG):
+        await channel.send(text[i:i+MAX_MSG])
+        if i + MAX_MSG < len(text):
+            await asyncio.sleep(0.3)
+
+# ── AskUserQuestion → Discord 按鈕 ─────────────────────────────────────
+def _parse_ask_questions(ask_data: dict) -> list[dict]:
+    if "questions" in ask_data:
+        return ask_data["questions"]
+    return [ask_data]
+
+async def _handle_cc_error(prog: discord.Message, err: "CCError", state: dict) -> None:
+    msg = err.user_msg
+    if err.kind in _RESET_SESSION:
+        state["session_id"] = None
+        state["ctx_tokens"] = 0
+        state["ctx_warned"] = False
+        _persist_session(state)
+        msg += "\n（已自動清除 session，下一則訊息會開新對話）"
+    if err.kind == "OVERLOADED":
+        inc = await asyncio.to_thread(is_incident_active)
+        if inc:
+            msg += f"\n（官方狀態：{inc}）"
+    raw = (err.raw or "").strip()
+    if raw:
+        msg += f"\n```\n[{err.kind}] {raw[:1500]}\n```"
+    try:
+        await prog.edit(content=msg[:2000])
+    except Exception:
+        pass
+
+async def _process_answer(channel: discord.TextChannel, chosen: str, state: dict) -> None:
+    if _processing.get(channel.id):
+        await channel.send("⏳ 還在處理中，請稍後再試。", delete_after=5)
+        return
+    _processing[channel.id] = True
+    prog = await channel.send(f"✅ 你選了：**{chosen}**\n⏳ **思考中...**")
+    try:
+        reply, new_sid, next_ask = await _run_tracked(channel.id, chosen, state, prog)
+        if new_sid:
+            state["session_id"] = new_sid
+            _persist_session(state)
+        await prog.delete()
+        if next_ask:
+            await _send_ask_question(channel, next_ask, state)
+        elif reply and reply != "（無回應）":
+            await _send_files_and_text(channel, reply)
+    except _StoppedByUser:
+        await prog.edit(content="🛑 已停止")
+    except CCError as e:
+        await _handle_cc_error(prog, e, state)
+    except Exception as e:
+        print(f"[CC_FAIL] kind=UNCLASSIFIED raw={e!r}", flush=True)
+        detail = f"{type(e).__name__}: {e}"[:1500]
+        await prog.edit(content=f"❌ 發生未預期錯誤。\n```\n{detail}\n```"[:2000])
+    finally:
+        _processing[channel.id] = False
+
+async def _send_ask_question(channel: discord.TextChannel, ask_data: dict, state: dict) -> None:
+    questions = _parse_ask_questions(ask_data)
+    for q in questions:
+        question_text = q.get("question", "請選擇：")
+        raw_options: list = q.get("options", [])
+
+        def _label(o) -> str:
+            if isinstance(o, dict):
+                return o.get("label") or o.get("value") or str(o)
+            return str(o)
+
+        def _desc(o) -> str:
+            return o.get("description", "") if isinstance(o, dict) else ""
+
+        opt_labels = [_label(o) for o in raw_options]
+        opt_descs = [_desc(o) for o in raw_options]
+
+        if not opt_labels:
+            await channel.send(f"❓ **{question_text}**\n（請直接打字回覆）")
+            continue
+
+        # 每個選項顯示「粗體標題＋下一行 blockquote 說明」，讓使用者看得到 description
+        _lines = []
+        for i, l in enumerate(opt_labels):
+            d = opt_descs[i].strip()[:200]   # 過長截斷，避免超過 Discord 2000 字上限
+            _lines.append(f"`{i+1}.` **{l}**" + (f"\n> {d}" if d else ""))
+        numbered = "\n".join(_lines)
+        body = f"❓ **{question_text}**\n{numbered}\n_點按鈕，或直接打數字／文字回答_"
+
+        state["pending_options"] = opt_labels
+
+        view = discord.ui.View(timeout=600)
+        answered = {"done": False}
+
+        async def on_to(v: discord.ui.View = view) -> None:
+            for item in v.children:
+                item.disabled = True
+            answered["done"] = True
+
+        view.on_timeout = on_to
+
+        async def _finish(inter: discord.Interaction, chosen: str) -> None:
+            if answered["done"]:
+                try:
+                    await inter.response.send_message("ℹ️ 此問題已結束。", ephemeral=True)
+                except Exception:
+                    pass
+                return
+            answered["done"] = True
+            state.pop("pending_options", None)
+            for item in view.children:
+                item.disabled = True
+            view.stop()
+            try:
+                await inter.response.edit_message(content=f"{body}\n\n✅ 已選擇：**{chosen}**", view=view)
+            except Exception:
+                try:
+                    await inter.response.defer()
+                except Exception:
+                    pass
+            await _process_answer(channel, chosen, state)
+
+        try:
+            if len(opt_labels) <= 5:
+                for label in opt_labels:
+                    btn = discord.ui.Button(label=label[:80], style=discord.ButtonStyle.primary)
+                    async def cb(inter: discord.Interaction, l: str = label) -> None:
+                        await _finish(inter, l)
+                    btn.callback = cb
+                    view.add_item(btn)
+            else:
+                opts = [discord.SelectOption(label=l[:100], value=str(i),
+                                             description=(opt_descs[i][:100] or None))
+                        for i, l in enumerate(opt_labels)]
+                sel = discord.ui.Select(placeholder="選擇一個選項...", options=opts[:25])
+                async def sel_cb(inter: discord.Interaction) -> None:
+                    idx = int(sel.values[0])
+                    await _finish(inter, opt_labels[idx])
+                sel.callback = sel_cb
+                view.add_item(sel)
+            await channel.send(body, view=view)
+        except Exception:
+            await channel.send(body)
+
+# ── Usage API ──────────────────────────────────────────────────────────
+def fetch_usage() -> Optional[dict]:
+    now = time.time()
+    if "data" in _usage_cache and now - _usage_cache.get("ts",0) < USAGE_CACHE_SEC:
+        return _usage_cache["data"]
+    try:
+        creds = json.loads((Path.home()/".claude"/".credentials.json").read_text())
+        token = creds["claudeAiOauth"]["accessToken"]
+        req = urllib.request.Request(
+            "https://api.anthropic.com/api/oauth/usage",
+            headers={"Authorization":f"Bearer {token}","anthropic-beta":"oauth-2025-04-20",
+                     "User-Agent":"claude-code/2.1.143","Content-Type":"application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+        _usage_cache["data"] = data
+        _usage_cache["ts"] = now
+        return data
+    except Exception:
+        return None
+
+def _bar(pct: float, w: int = 14) -> str:
+    f = round(pct/100*w)
+    return "█"*f + "░"*(w-f)
+
+def _reset(ts: str) -> str:
+    try:
+        return datetime.fromisoformat(ts.replace("Z","+00:00")).astimezone().strftime("%H:%M")
+    except Exception:
+        return ts
+
+def _countdown(ts: str) -> str:
+    try:
+        target = datetime.fromisoformat(ts.replace("Z","+00:00"))
+        delta = target - datetime.now(timezone.utc)
+        secs = int(delta.total_seconds())
+        if secs <= 0:
+            return "即將重置"
+        h, m = secs // 3600, (secs % 3600) // 60
+        if h >= 24:
+            d = h // 24
+            return f"{d} 天 {h % 24} 小時後"
+        if h:
+            return f"{h} 小時 {m} 分後"
+        return f"{m} 分後"
+    except Exception:
+        return ts
+
+# ── 排程背景循環 ───────────────────────────────────────────────────────
+async def _schedule_loop() -> None:
+    """每 30 秒檢查到期排程並執行。"""
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        await asyncio.sleep(30)
+        try:
+            schedules = _load_schedules()
+            now = datetime.now()
+            modified = False
+            for s in schedules:
+                try:
+                    next_run = datetime.fromisoformat(s["next_run"])
+                except Exception:
+                    continue
+                if now < next_run:
+                    continue
+                # 到期 → 執行
+                channel = bot.get_channel(s["channel_id"])
+                if channel:
+                    state = get_state(s["channel_id"])
+                    await channel.send(f"⏰ **執行排程**：{s['task']}")
+                    try:
+                        reply, new_sid, _ = await run_claude(s["task"], state)
+                        if new_sid:
+                            state["session_id"] = new_sid
+                            _persist_session(state)
+                        if reply and reply != "（無回應）":
+                            await send_long(channel, reply)
+                    except Exception as e:
+                        await channel.send(f"❌ 排程執行失敗：{e}")
+                # 計算下次執行時間
+                cron_expr = s.get("cron", "").strip()
+                if _HAS_CRONITER and cron_expr:
+                    try:
+                        s["next_run"] = _croniter(cron_expr, now).get_next(datetime).isoformat()
+                        modified = True
+                    except Exception:
+                        s["_delete"] = True
+                        modified = True
+                else:
+                    # 一次性任務
+                    s["_delete"] = True
+                    modified = True
+            if modified:
+                schedules = [s for s in schedules if not s.get("_delete")]
+                _save_schedules(schedules)
+        except Exception as e:
+            print(f"[SCHEDULE_LOOP] error: {e}", flush=True)
+
+# ── Bot 本體 ───────────────────────────────────────────────────────────
+intents = discord.Intents.default()
+intents.message_content = True
+bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
+bot._session_pick_cache = []
+
+async def _update_presence(cid: int, label: str) -> None:
+    """把「頻道名｜session 標題」設成 bot 的 Discord 狀態。
+    多頻道時 Discord 只能有一個全域狀態，加頻道名讓你看得出顯示的是哪個頻道。"""
+    ch = bot.get_channel(cid)
+    name = getattr(ch, "name", None) or "cc"
+    try:
+        await bot.change_presence(activity=discord.CustomActivity(name=f"💬 {name}｜{label}"[:128]))
+    except Exception:
+        pass
+
+# ── 多 session 側欄（頻道即對話）─────────────────────────────────────────
+_sidebar_category_id: Optional[int] = None   # 「CC 對話」分類 id
+_sidebar_entry_id: Optional[int] = None      # 入口頻道 id
+
+def _safe_channel_name(title: str) -> str:
+    """把標題轉成可用的頻道名：去頭尾空白、換行轉空白、截斷到 90 字。"""
+    name = " ".join((title or "").split())[:90].strip()
+    return name or "新對話"
+
+async def _open_sidebar_channel(guild: discord.Guild, category: discord.CategoryChannel,
+                                session_id: Optional[str] = None, title: Optional[str] = None,
+                                cwd: Optional[str] = None) -> Optional[discord.TextChannel]:
+    """在側欄分類頂端（入口下方）建一個頻道並綁 session；有 title 就直接命名、不再自動改名。
+    回傳 channel；缺權限或失敗回 None。"""
+    name = _safe_channel_name(title) if title else "🆕-新對話"
+    try:
+        ch = await guild.create_text_channel(name, category=category, position=1)
+    except (discord.Forbidden, Exception) as e:
+        print(f"[SIDEBAR] 建頻道失敗：{e}", flush=True)
+        return None
+    st = get_state(ch.id)
+    st["session_id"] = session_id
+    st["cwd"] = Path(cwd) if cwd and Path(cwd).is_dir() else DEFAULT_DIR
+    st["_sidebar"] = True
+    st["_named"] = bool(title)   # 救回已有標題的不用再自動改名；全新對話留待第一句後改名
+    if title:
+        st["_session_label"] = title
+        if session_id:
+            _save_title(session_id, title)   # 標題寫進快取，/sessions 顯示一致
+    _allowed_channels.add(ch.id)
+    if session_id:
+        _persist_session(st)
+    return ch
+
+async def _restore_session_to_channel(inter: discord.Interaction, entry: dict) -> None:
+    """把選到的歷史對話救回成側欄一個新頻道（保住一頻道一 session）。
+    沒有側欄分類時退回舊行為：切換目前頻道。"""
+    title = (entry.get("title") or entry.get("first_prompt") or entry.get("snippet") or "救回的對話")[:60]
+    cwd, ok = _resolve_project_dir(entry["project_path"])
+    category = bot.get_channel(_sidebar_category_id) if _sidebar_category_id else None
+    if inter.guild and isinstance(category, discord.CategoryChannel):
+        ch = await _open_sidebar_channel(inter.guild, category,
+                                         session_id=entry["session_id"], title=title, cwd=str(cwd))
+        if ch:
+            await inter.response.edit_message(
+                content=f"✅ 已把對話救回成新頻道 → {ch.mention}（點我過去繼續）", view=None)
+            return
+    # 退回舊行為：切換目前頻道
+    state = get_state(inter.channel_id)
+    state["session_id"] = entry["session_id"]
+    state["cwd"] = cwd
+    state["_session_label"] = title
+    _persist_session(state)
+    await _update_presence(inter.channel_id, title)
+    note = "" if ok else f"\n⚠️ 原資料夾不存在，已改用 `{cwd}`"
+    await inter.response.edit_message(
+        content=f"✅ 已切換：**{title}**\n📂 `{cwd}`{note}\n\n傳訊息繼續對話。", view=None)
+
+class NewChatView(discord.ui.View):
+    """入口頻道的常駐「開新對話」按鈕（custom_id 固定、timeout=None，重啟後仍可點）。"""
+    def __init__(self) -> None:
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="➕ 開新對話", style=discord.ButtonStyle.primary, custom_id="cc_new_chat")
+    async def new_chat(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if interaction.user.id != ALLOWED_USER:
+            await interaction.response.send_message("❌ 只有主帳號能開新對話。", ephemeral=True)
+            return
+        guild = interaction.guild
+        category = interaction.channel.category if interaction.channel else None
+        if guild is None or category is None:
+            await interaction.response.send_message("❌ 找不到分類，無法開頻道。", ephemeral=True)
+            return
+        ch = await _open_sidebar_channel(guild, category)
+        if ch is None:
+            await interaction.response.send_message(
+                "❌ 開頻道失敗（可能缺少「管理頻道」權限）。", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            f"✅ 已開好新對話 → {ch.mention}（點我過去，在裡面打第一句話）", ephemeral=True)
+
+async def _bump_channel_to_top(channel: discord.TextChannel) -> None:
+    """把側欄頻道移到入口下方（最新活動置頂）；已在頂端就不動，省 rate limit。"""
+    try:
+        category = channel.category
+        if category is None or category.id != _sidebar_category_id:
+            return
+        entry = bot.get_channel(_sidebar_entry_id) if _sidebar_entry_id else None
+        if entry is None:
+            return
+        # 已經是入口正下方第一個就不搬
+        convo = [c for c in category.text_channels if c.id != _sidebar_entry_id]
+        if convo and convo[0].id == channel.id:
+            return
+        await channel.move(after=entry, category=category)
+    except Exception as e:
+        print(f"[SIDEBAR] 置頂失敗：{e}", flush=True)
+
+async def _autoname_channel(channel: discord.TextChannel, state: dict) -> None:
+    """側欄頻道第一句後：讀內容生成中文標題、改頻道名（受 2 次/10 分鐘改名限制，故只改一次）。"""
+    try:
+        title = await _generate_title(state["session_id"])
+        if not title:
+            return
+        _save_title(state["session_id"], title)
+        state["_session_label"] = title
+        await channel.edit(name=_safe_channel_name(title))
+        await _update_presence(channel.id, title)
+    except Exception as e:
+        print(f"[SIDEBAR] 自動改名失敗：{e}", flush=True)
+
+async def _ensure_sidebar(guild: discord.Guild) -> None:
+    """確保「CC 對話」分類與入口頻道存在、掛上常駐按鈕，並把分類底下頻道納入可用清單。"""
+    global _sidebar_category_id, _sidebar_entry_id
+    try:
+        category = discord.utils.get(guild.categories, name=SIDEBAR_CATEGORY)
+        if category is None:
+            category = await guild.create_category(SIDEBAR_CATEGORY)
+        _sidebar_category_id = category.id
+        # 分類底下的對話頻道全部納入可用清單（入口頻道除外）
+        entry = None
+        for ch in category.text_channels:
+            if ch.name == SIDEBAR_ENTRY or ch.name.startswith("➕"):
+                entry = ch
+            else:
+                _allowed_channels.add(ch.id)
+        # 入口頻道不存在就建，並固定在最上面
+        if entry is None:
+            entry = await guild.create_text_channel(SIDEBAR_ENTRY, category=category, position=0)
+        _sidebar_entry_id = entry.id
+        # 入口頻道若還沒有按鈕訊息就發一則（已發過就不重複）
+        has_btn = False
+        async for m in entry.history(limit=20):
+            if m.author == bot.user and m.components:
+                has_btn = True
+                break
+        if not has_btn:
+            await entry.send(
+                "**🗂️ CC 對話**\n"
+                "• 點下面按鈕 → 開一個新對話（在上方建新頻道）\n"
+                "• 想接續舊對話 → 在這裡打 `/sessions`（全部）或 `/search 關鍵字`，選一個會救回成新頻道",
+                view=NewChatView())
+        print(f"[SIDEBAR] category={_sidebar_category_id} entry={_sidebar_entry_id}", flush=True)
+    except discord.Forbidden:
+        print("[SIDEBAR] 缺少管理頻道權限，略過側欄初始化", flush=True)
+    except Exception as e:
+        print(f"[SIDEBAR] 初始化失敗：{e}", flush=True)
+
+async def check_auth(interaction: discord.Interaction, owner_only: bool = False) -> bool:
+    # 入口頻道雖不處理一般訊息，但允許在那邊用指令（/sessions、/search 等）
+    if interaction.channel_id not in _allowed_channels and interaction.channel_id != _sidebar_entry_id:
+        await interaction.response.send_message("❌ 無權限。", ephemeral=True)
+        return False
+    if owner_only and interaction.user.id != ALLOWED_USER:
+        await interaction.response.send_message("❌ 只有主帳號能執行此指令。", ephemeral=True)
+        return False
+    if interaction.user.id not in _allowed_users:
+        await interaction.response.send_message("❌ 無權限。", ephemeral=True)
+        return False
+    return True
+
+@bot.event
+async def on_ready():
+    await bot.tree.sync()
+    print(f"Discord bot 已上線：{bot.user}", flush=True)
+    asyncio.create_task(_schedule_loop())
+    # 背景預載 Whisper 模型，讓第一則語音訊息就快（首次會下載 large-v3 約 1.5GB）
+    asyncio.create_task(asyncio.to_thread(_get_whisper))
+    # 多 session 側欄：註冊常駐按鈕 + 確保分類/入口頻道存在
+    bot.add_view(NewChatView())   # 讓重啟前發出的按鈕仍可點
+    main_ch = bot.get_channel(ALLOWED_CHANNEL)
+    guild = main_ch.guild if main_ch else (bot.guilds[0] if bot.guilds else None)
+    if guild:
+        await _ensure_sidebar(guild)
+    # 啟動時把 bot 狀態設成上次的 session 標題
+    sid = get_state(ALLOWED_CHANNEL).get("session_id")
+    await _update_presence(ALLOWED_CHANNEL, await asyncio.to_thread(_session_label, sid))
+    # 版本變更 → 推送更新公告（未設定 UPDATE_CHANNEL 時跳過）
+    if UPDATE_CHANNEL and _get_last_version() != BOT_VERSION:
+        try:
+            ch = bot.get_channel(UPDATE_CHANNEL) or await bot.fetch_channel(UPDATE_CHANNEL)
+            if ch:
+                tag = _CHANGE_TYPE_LABEL.get(CHANGE_TYPE, "")
+                header = f"🚀 **Bot 更新 v{BOT_VERSION}**"
+                if tag:
+                    header += f"　`{tag}`"
+                await ch.send(f"{header}\n\n{CHANGELOG}")
+                _save_last_version(BOT_VERSION)
+        except Exception as e:
+            print(f"[UPDATE_PUSH] failed: {e}", flush=True)
+
+@bot.event
+async def on_guild_channel_delete(channel: discord.abc.GuildChannel) -> None:
+    """側欄頻道被刪 → 清掉它的 session 記錄與 state（Claude JSONL 留在硬碟，日後可救回）。"""
+    if channel.id == _sidebar_entry_id:
+        return
+    _allowed_channels.discard(channel.id)
+    _sessions.pop(channel.id, None)
+    try:
+        data = _load_sessions_map()
+        if str(channel.id) in data:
+            del data[str(channel.id)]
+            _SESSION_FILE.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+@bot.event
+async def on_guild_channel_create(channel: discord.abc.GuildChannel) -> None:
+    """手動在「CC 對話」分類建頻道 → 自動綁一個空 session（bot 自己建的已在 _allowed_channels，會被跳過）。"""
+    if not isinstance(channel, discord.TextChannel):
+        return
+    if (channel.category_id != _sidebar_category_id
+            or channel.id == _sidebar_entry_id
+            or channel.id in _allowed_channels):
+        return
+    st = get_state(channel.id)
+    st["_sidebar"] = True
+    st["_named"] = True   # 手動建的由使用者自己命名，不自動改名
+    _allowed_channels.add(channel.id)
+
+# ── Slash 指令 ─────────────────────────────────────────────────────────
+
+@bot.tree.command(name="new", description="重置對話，開新 session")
+async def cmd_new(interaction: discord.Interaction):
+    if not await check_auth(interaction): return
+    st = get_state(interaction.channel_id)
+    st["session_id"] = None
+    st["ctx_tokens"] = 0
+    st["ctx_warned"] = False
+    st["_session_label"] = "🆕 新對話"
+    _persist_session(st)
+    await _update_presence(interaction.channel_id, "🆕 新對話")
+    await interaction.response.send_message("✅ 對話已重置，接下來要做什麼？")
+
+@bot.tree.command(name="rename", description="重新命名目前對話（留空＝讀內容自動生成中文標題）")
+async def cmd_rename(interaction: discord.Interaction, name: Optional[str] = None):
+    if not await check_auth(interaction): return
+    state = get_state(interaction.channel_id)
+    sid = state.get("session_id")
+    if not sid:
+        await interaction.response.send_message("⚠️ 目前沒有進行中的對話可命名。", ephemeral=True)
+        return
+    await interaction.response.defer()
+    if name and name.strip():
+        title = name.strip()[:30]
+    else:
+        title = await _generate_title(sid)
+        if not title:
+            await interaction.followup.send("❌ 讀內容生成標題失敗，可改用 `/rename 自訂名稱`。")
+            return
+    _save_title(sid, title)
+    state["_session_label"] = title
+    await _update_presence(interaction.channel_id, title)
+    await interaction.followup.send(f"✅ 已命名為：**{title}**")
+
+@bot.tree.command(name="stop", description="立即停止目前正在執行的工作")
+async def cmd_stop(interaction: discord.Interaction):
+    if not await check_auth(interaction): return
+    task = _running_tasks.get(interaction.channel_id)
+    if task and not task.done():
+        task.cancel()
+        await interaction.response.send_message("🛑 已送出停止訊號，工作將中止。")
+    else:
+        await interaction.response.send_message("ℹ️ 目前沒有正在執行的工作。", ephemeral=True)
+
+@bot.tree.command(name="continue", description="繼續上次 session")
+async def cmd_continue(interaction: discord.Interaction):
+    if not await check_auth(interaction): return
+    state = get_state(interaction.channel_id)
+    if state.get("session_id"):
+        await interaction.response.send_message(f"▶️ 繼續 session `{state['session_id'][:8]}...`，傳訊息繼續對話。")
+    else:
+        await interaction.response.send_message("⚠️ 目前沒有進行中的 session，直接傳訊息會自動開始新的。")
+
+@bot.tree.command(name="status", description="顯示目前狀態")
+async def cmd_status(interaction: discord.Interaction):
+    if not await check_auth(interaction): return
+    state = get_state(interaction.channel_id)
+    sid = state["session_id"]
+    label = await asyncio.to_thread(_session_label, sid)
+    ctx = state.get("ctx_tokens", 0)
+    ctx_bar = _bar(ctx / 1_000_000 * 100)
+    lines = [
+        "**📊 目前狀態**",
+        f"💬 對話：**{label}**",
+        f"📂 目錄：`{state['cwd']}`",
+        f"🔗 Session：`{sid[:8]}...`" if sid else "🔗 Session：無",
+        f"🤖 模型：`{state['model'] or '預設'}`（備援：`{FALLBACK_MODEL}`）",
+        f"🧠 思考：`{state['effort'] or '預設'}`",
+        f"📈 Context：`[{ctx_bar}]` `{ctx:,}` / 1,000,000 tokens",
+    ]
+    await interaction.response.send_message("\n".join(lines))
+
+@bot.tree.command(name="sessions", description="列出歷史對話並切換")
+@discord.app_commands.choices(scope=[
+    discord.app_commands.Choice(name="我的對話", value="mine"),
+    discord.app_commands.Choice(name="電腦上全部（桌面版）", value="all"),
+])
+async def cmd_sessions(interaction: discord.Interaction, scope: str = "mine"):
+    if not await check_auth(interaction): return
+    await interaction.response.defer(ephemeral=True)   # ephemeral：只有你看得到，入口頻道零殘留
+    entries = await asyncio.to_thread(_list_sessions, scope)
+    if not entries:
+        await interaction.followup.send("📭 沒有任何歷史對話。", ephemeral=True)
+        return
+    bot._session_pick_cache = entries
+
+    options = []
+    for i, e in enumerate(entries):
+        dt = datetime.fromtimestamp(e["mtime"]).strftime("%m/%d %H:%M")
+        label = (e["title"] or e["first_prompt"] or "（無標題）")[:95]
+        # 描述放第一句訊息片段，讓同標題的對話也分得出來
+        desc = f"{dt} · {e['first_prompt']}" if e["first_prompt"] else dt
+        options.append(discord.SelectOption(label=label, description=desc[:95], value=str(i)))
+
+    class SessionSelect(discord.ui.Select):
+        def __init__(self):
+            super().__init__(placeholder="選擇要救回的對話...", options=options)
+        async def callback(self, inter: discord.Interaction):
+            entry = bot._session_pick_cache[int(self.values[0])]
+            await _restore_session_to_channel(inter, entry)
+
+    view = discord.ui.View()
+    view.add_item(SessionSelect())
+    header = "🖥️ **電腦上所有對話**（含桌面版）" if scope == "all" else "📋 **歷史對話**（只列本 bot 的對話）"
+    await interaction.followup.send(header, view=view, ephemeral=True)
+
+def _search_sessions(keyword: str, limit: int = 15) -> list[dict]:
+    claude_home = Path.home() / ".claude" / "projects"
+    if not claude_home.exists():
+        return []
+    kw = keyword.lower()
+    hits: list[dict] = []
+    for proj_dir in claude_home.iterdir():
+        if not proj_dir.is_dir():
+            continue
+        for jf in proj_dir.glob("*.jsonl"):
+            meta = _session_meta(jf)
+            if not meta["is_bot"]:  # 只搜本 bot 自己的對話
+                continue
+            snippet = ""
+            try:
+                with jf.open("r", encoding="utf-8", errors="replace") as f:
+                    for line in f:
+                        if kw in line.lower():
+                            try:
+                                obj = json.loads(line)
+                                txt = json.dumps(obj.get("message", obj), ensure_ascii=False)
+                            except Exception:
+                                txt = line
+                            low = txt.lower()
+                            pos = low.find(kw)
+                            s = max(0, pos - 30)
+                            snippet = txt[s:pos + 50].replace("\n", " ").strip()
+                            break
+            except Exception:
+                continue
+            if snippet:
+                hits.append({
+                    "session_id": jf.stem,
+                    "project_path": meta["cwd"] or str(DEFAULT_DIR),
+                    "mtime": jf.stat().st_mtime,
+                    "title": meta["title"],
+                    "snippet": snippet,
+                })
+    return sorted(hits, key=lambda e: e["mtime"], reverse=True)[:limit]
+
+@bot.tree.command(name="search", description="搜尋歷史對話內容（依關鍵字）")
+async def cmd_search(interaction: discord.Interaction, keyword: str):
+    if not await check_auth(interaction): return
+    await interaction.response.defer(ephemeral=True)   # ephemeral：零殘留
+    entries = await asyncio.to_thread(_search_sessions, keyword)
+    if not entries:
+        await interaction.followup.send(f"🔍 找不到提到「{keyword}」的對話。", ephemeral=True)
+        return
+    bot._session_pick_cache = entries
+
+    options = []
+    for i, e in enumerate(entries):
+        dt = datetime.fromtimestamp(e["mtime"]).strftime("%m/%d %H:%M")
+        label = (e["title"] or e["project_path"])[:95]
+        desc = f"{dt}｜…{e['snippet'][:70]}"
+        options.append(discord.SelectOption(label=label, description=desc[:100], value=str(i)))
+
+    class SearchSelect(discord.ui.Select):
+        def __init__(self):
+            super().__init__(placeholder="選擇要救回的對話...", options=options)
+        async def callback(self, inter: discord.Interaction):
+            entry = bot._session_pick_cache[int(self.values[0])]
+            await _restore_session_to_channel(inter, entry)
+
+    view = discord.ui.View()
+    view.add_item(SearchSelect())
+    await interaction.followup.send(f"🔍 **搜尋「{keyword}」的結果**（{len(entries)} 筆）", view=view, ephemeral=True)
+
+@bot.tree.command(name="model", description="選擇 Claude 模型")
+@discord.app_commands.choices(model=[
+    discord.app_commands.Choice(name="Sonnet 4.6（推薦）", value="claude-sonnet-4-6"),
+    discord.app_commands.Choice(name="Sonnet 4.5",          value="claude-sonnet-4-5"),
+    discord.app_commands.Choice(name="Opus 4.8",            value="claude-opus-4-8"),
+    discord.app_commands.Choice(name="Haiku 4.5（快速）",   value="claude-haiku-4-5-20251001"),
+    discord.app_commands.Choice(name="預設",                 value="default"),
+])
+async def cmd_model(interaction: discord.Interaction, model: str):
+    if not await check_auth(interaction): return
+    st = get_state(interaction.channel_id)
+    st["model"] = None if model == "default" else model
+    _persist_session(st)   # 立刻存檔，重啟後仍記得
+    await interaction.response.send_message(f"✅ 模型設為 `{model}`")
+
+@bot.tree.command(name="effort", description="選擇思考程度")
+@discord.app_commands.choices(effort=[
+    discord.app_commands.Choice(name="low（快速）", value="low"),
+    discord.app_commands.Choice(name="medium",      value="medium"),
+    discord.app_commands.Choice(name="high",        value="high"),
+    discord.app_commands.Choice(name="xhigh",       value="xhigh"),
+    discord.app_commands.Choice(name="max（最強）", value="max"),
+    discord.app_commands.Choice(name="預設",        value="default"),
+])
+async def cmd_effort(interaction: discord.Interaction, effort: str):
+    if not await check_auth(interaction): return
+    st = get_state(interaction.channel_id)
+    st["effort"] = None if effort == "default" else effort
+    _persist_session(st)   # 立刻存檔，重啟後仍記得
+    await interaction.response.send_message(f"✅ 思考程度設為 `{effort}`")
+
+@bot.tree.command(name="cd", description="切換工作目錄")
+async def cmd_cd(interaction: discord.Interaction, path: str):
+    if not await check_auth(interaction): return
+    p = Path(path)
+    if not p.exists() or not p.is_dir():
+        await interaction.response.send_message(f"❌ 目錄不存在：`{path}`")
+        return
+    st = get_state(interaction.channel_id)
+    st["cwd"] = p
+    _persist_session(st)   # 立刻存檔，重啟後仍記得
+    await interaction.response.send_message(f"📂 切換到 `{p}`")
+
+@bot.tree.command(name="pwd", description="顯示目前工作目錄")
+async def cmd_pwd(interaction: discord.Interaction):
+    if not await check_auth(interaction): return
+    cwd = get_state(interaction.channel_id)["cwd"]
+    await interaction.response.send_message(f"📂 `{cwd}`")
+
+@bot.tree.command(name="screenshot", description="截取電腦目前畫面")
+async def cmd_screenshot(interaction: discord.Interaction):
+    if not await check_auth(interaction): return
+    await interaction.response.defer()
+    shot = await _capture_screenshot()
+    if not shot:
+        await interaction.followup.send("❌ 截圖失敗。")
+        return
+    try:
+        if shot.stat().st_size > _DISCORD_FILE_LIMIT:
+            await interaction.followup.send("❌ 截圖檔案過大，無法上傳。")
+        else:
+            await interaction.followup.send("🖥️ 目前畫面：", file=discord.File(str(shot)))
+    finally:
+        try:
+            shot.unlink()
+        except Exception:
+            pass
+
+@bot.tree.command(name="usage", description="查看 Plan 用量（5h / 7d）")
+async def cmd_usage(interaction: discord.Interaction):
+    if not await check_auth(interaction): return
+    await interaction.response.defer()
+    data = await asyncio.get_event_loop().run_in_executor(None, fetch_usage)
+    if not data:
+        await interaction.followup.send("❌ 無法取得用量（可能被 rate limit，3 分鐘後再試）")
+        return
+    lines = ["**📊 Plan 用量**\n"]
+    shown = False
+    for key, label in [("five_hour","5 小時限制"),("seven_day","7 天限制（全模型）"),
+                        ("seven_day_sonnet","7 天 Sonnet"),("seven_day_opus","7 天 Opus")]:
+        obj = data.get(key)
+        if not obj: continue
+        pct = obj.get("utilization")
+        if pct is None:
+            pct = obj.get("percent_used", 0)
+        resets = obj.get("resets_at", "")
+        lines.append(f"**{label}**　重置：{_reset(resets)}（{_countdown(resets)}）")
+        lines.append(f"`[{_bar(pct)}]` {pct:.0f}%")
+        shown = True
+    if not shown:
+        await interaction.followup.send("⚠️ 取得用量但內容為空，API 格式可能有變。")
+        return
+    lines.append("\n_資料快取 3 分鐘_")
+    await interaction.followup.send("\n".join(lines))
+
+@bot.tree.command(name="schedule", description="建立排程任務（自然語言）")
+async def cmd_schedule(interaction: discord.Interaction, task: str):
+    if not await check_auth(interaction): return
+    await interaction.response.defer()
+    parse_prompt = (
+        f"你是排程解析器。將以下排程需求解析成純 JSON（不加說明、不加 markdown code block）：\n"
+        f"{{\"task\": \"任務描述\", \"cron\": \"cron 表達式\", \"next_run\": \"ISO 8601 時間\"}}\n"
+        f"cron 格式為 '分 時 日 月 週'，next_run 為台灣時間（UTC+8）的 ISO 格式。\n"
+        f"若為一次性任務，cron 留空字串。\n"
+        f"排程需求：{task}"
+    )
+    tmp_state: dict = {"session_id": None, "cwd": DEFAULT_DIR, "model": "claude-haiku-4-5-20251001", "effort": None}
+    try:
+        result, _, _ = await run_claude(parse_prompt, tmp_state)
+        json_match = re.search(r'\{.*\}', result, re.DOTALL)
+        if not json_match:
+            await interaction.followup.send(f"❌ CC 無法解析排程，請再試一次。\n```\n{result[:300]}\n```")
+            return
+        parsed = json.loads(json_match.group())
+        schedule: dict = {
+            "id": str(uuid.uuid4())[:8],
+            "user_id": interaction.user.id,
+            "channel_id": interaction.channel_id,
+            "task": parsed.get("task", task),
+            "cron": parsed.get("cron", ""),
+            "next_run": parsed.get("next_run", ""),
+            "created_at": datetime.now().isoformat(),
+        }
+        schedules = _load_schedules()
+        schedules.append(schedule)
+        _save_schedules(schedules)
+        embed = discord.Embed(title="⏰ 排程已建立", color=discord.Color.blue())
+        embed.add_field(name="任務", value=schedule["task"], inline=False)
+        cron_display = f"`{schedule['cron']}`" if schedule["cron"] else "一次性"
+        embed.add_field(name="Cron", value=cron_display, inline=True)
+        embed.add_field(name="下次執行", value=schedule["next_run"][:16] if schedule["next_run"] else "未知", inline=True)
+        embed.set_footer(text=f"ID: {schedule['id']}")
+        await interaction.followup.send(embed=embed)
+    except Exception as e:
+        await interaction.followup.send(f"❌ 建立排程失敗：{e}")
+
+@bot.tree.command(name="schedules", description="列出並管理排程")
+async def cmd_schedules(interaction: discord.Interaction):
+    if not await check_auth(interaction): return
+    schedules = _load_schedules()
+    if not schedules:
+        await interaction.response.send_message("📭 目前沒有排程。", ephemeral=True)
+        return
+    lines = ["**⏰ 排程列表**\n"]
+    for s in schedules:
+        cron_disp = s.get("cron") or "一次性"
+        next_disp = s.get("next_run","")[:16] or "未知"
+        lines.append(f"`{s['id']}` — {s['task']}\n　　下次：`{next_disp}` | Cron：`{cron_disp}`")
+
+    view = discord.ui.View()
+    for s in schedules[:5]:
+        btn = discord.ui.Button(label=f"刪除 {s['id']}", style=discord.ButtonStyle.danger)
+        async def del_cb(inter: discord.Interaction, sid: str = s["id"]) -> None:
+            sched_list = _load_schedules()
+            sched_list = [x for x in sched_list if x["id"] != sid]
+            _save_schedules(sched_list)
+            await inter.response.send_message(f"✅ 已刪除排程 `{sid}`", ephemeral=True)
+        btn.callback = del_cb
+        view.add_item(btn)
+
+    await interaction.response.send_message("\n".join(lines), view=view)
+
+@bot.tree.command(name="adduser", description="新增允許使用 bot 的使用者（主帳號限定）")
+async def cmd_adduser(interaction: discord.Interaction, user: discord.Member):
+    if not await check_auth(interaction, owner_only=True): return
+    if user.id == ALLOWED_USER:
+        await interaction.response.send_message("ℹ️ 主帳號本來就有權限。", ephemeral=True)
+        return
+    _allowed_users.add(user.id)
+    _save_allowed_users(_allowed_users)
+    await interaction.response.send_message(f"✅ 已新增 {user.mention}（`{user.id}`）的使用權限。")
+
+@bot.tree.command(name="removeuser", description="移除使用者的 bot 權限（主帳號限定）")
+async def cmd_removeuser(interaction: discord.Interaction, user: discord.Member):
+    if not await check_auth(interaction, owner_only=True): return
+    if user.id == ALLOWED_USER:
+        await interaction.response.send_message("❌ 無法移除主帳號。", ephemeral=True)
+        return
+    _allowed_users.discard(user.id)
+    _save_allowed_users(_allowed_users)
+    await interaction.response.send_message(f"✅ 已移除 {user.mention}（`{user.id}`）的使用權限。")
+
+@bot.tree.command(name="listusers", description="列出目前有權限的使用者")
+async def cmd_listusers(interaction: discord.Interaction):
+    if not await check_auth(interaction, owner_only=True): return
+    lines = [f"• `{uid}`{'（主帳號）' if uid == ALLOWED_USER else ''}" for uid in _allowed_users]
+    await interaction.response.send_message("**有權限的使用者：**\n" + "\n".join(lines), ephemeral=True)
+
+@bot.tree.command(name="addchannel", description="把目前頻道加進可用清單（主帳號限定，可開多頻道並行）")
+async def cmd_addchannel(interaction: discord.Interaction):
+    # 此指令本身不能用 check_auth（新頻道還沒在清單裡），改直接驗證主帳號
+    if interaction.user.id != ALLOWED_USER:
+        await interaction.response.send_message("❌ 只有主帳號能執行此指令。", ephemeral=True)
+        return
+    cid = interaction.channel_id
+    if cid in _allowed_channels:
+        await interaction.response.send_message("ℹ️ 這個頻道已經在清單裡了。", ephemeral=True)
+        return
+    _allowed_channels.add(cid)
+    _save_allowed_channels(_allowed_channels)
+    await interaction.response.send_message(
+        "✅ 已把這個頻道加入！現在可以在這裡跟另一個頻道**同時各跑一個任務**。")
+
+@bot.tree.command(name="removechannel", description="把目前頻道移出可用清單（主帳號限定）")
+async def cmd_removechannel(interaction: discord.Interaction):
+    if not await check_auth(interaction, owner_only=True): return
+    cid = interaction.channel_id
+    if cid == ALLOWED_CHANNEL:
+        await interaction.response.send_message("❌ 無法移除主頻道。", ephemeral=True)
+        return
+    _allowed_channels.discard(cid)
+    _save_allowed_channels(_allowed_channels)
+    await interaction.response.send_message("✅ 已把這個頻道移出可用清單。")
+
+@bot.tree.command(name="help", description="顯示所有指令")
+async def cmd_help(interaction: discord.Interaction):
+    if not await check_auth(interaction): return
+    lines = [
+        "**🤖 Claude Code Bot**\n",
+        "直接傳訊息 → 送給 Claude（不需要 @）\n",
+        "`/new` — 重置對話",
+        "`/rename [名稱]` — 重新命名對話（留空＝讀內容自動生成中文標題）",
+        "`/stop` — 立即停止目前工作",
+        "`/continue` — 繼續上次 session",
+        "`/sessions` — 切換歷史對話",
+        "`/search <關鍵字>` — 搜尋歷史對話內容",
+        "`/status` — 目前狀態",
+        "`/model` — 選擇模型",
+        "`/effort` — 選擇思考程度",
+        "`/cd <路徑>` — 切換工作目錄",
+        "`/pwd` — 目前目錄",
+        "`/screenshot` — 截取電腦目前畫面",
+        "`/usage` — Plan 用量",
+        "`/schedule <自然語言>` — 建立排程",
+        "`/schedules` — 列出並刪除排程",
+        "`/addchannel` — 把目前頻道加入（可開多頻道並行跑工作）",
+        "`/removechannel` — 把目前頻道移出",
+        "`/adduser @user` — 新增使用權限（主帳號限定）",
+        "`/removeuser @user` — 移除使用權限（主帳號限定）",
+        "`/listusers` — 列出有權限的使用者",
+    ]
+    await interaction.response.send_message("\n".join(lines))
+
+# ── 一般訊息 → 送給 Claude ──────────────────────────────────────────────
+@bot.event
+async def on_message(message: discord.Message):
+    if message.author.bot:
+        return
+    if message.channel.id not in _allowed_channels or message.author.id not in _allowed_users:
+        return
+    if message.content.startswith("/"):
+        await bot.process_commands(message)
+        return
+
+    if _processing.get(message.channel.id):
+        await message.channel.send("⏳ 還在處理上一則訊息，請稍後再試。", delete_after=5)
+        return
+
+    state = get_state(message.channel.id)
+    text = re.sub(r"<@!?\d+>", "", message.content).strip()
+
+    # 若有待答選項，使用者打數字 → 對應到選項文字
+    pending = state.get("pending_options")
+    if pending and text.isdigit():
+        idx = int(text) - 1
+        if 0 <= idx < len(pending):
+            chosen = pending[idx]
+            state.pop("pending_options", None)
+            await _process_answer(message.channel, chosen, state)
+            return
+
+    _processing[message.channel.id] = True
+
+    # 處理附件
+    if message.attachments:
+        tmp_dir = Path(__file__).parent / "tmp"
+        tmp_dir.mkdir(exist_ok=True)
+        saved: list[str] = []
+        failed: list[str] = []
+        voice_texts: list[str] = []
+        for att in message.attachments:
+            dest = tmp_dir / att.filename
+            # 語音訊息 → 本機 STT 轉文字（CC 讀不了音訊），不當檔案路徑給 CC
+            if (att.content_type or "").startswith("audio/"):
+                try:
+                    req = urllib.request.Request(att.url, headers={"User-Agent": "Mozilla/5.0"})
+                    with urllib.request.urlopen(req) as r, open(dest, "wb") as f:
+                        f.write(r.read())
+                    transcript = await asyncio.to_thread(_transcribe, str(dest))
+                    if transcript:
+                        voice_texts.append(transcript)
+                except Exception as ex:
+                    failed.append(f"{att.filename}（語音轉文字失敗：{ex}）")
+                continue
+            try:
+                req = urllib.request.Request(att.url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req) as r, open(dest, "wb") as f:
+                    f.write(r.read())
+                # 簡報轉 PDF 後給 CC 視覺讀取；轉檔失敗則回退原檔
+                if dest.suffix.lower() in (".ppt", ".pptx"):
+                    pdf = await _convert_pptx(dest)
+                    saved.append(str(pdf) if pdf else str(dest))
+                else:
+                    saved.append(str(dest))
+            except Exception as ex:
+                failed.append(f"{att.filename}（{ex}）")
+        # 語音辨識結果當成使用者打的字
+        if voice_texts:
+            heard = " ".join(voice_texts)
+            await message.channel.send(f"🎤 聽到：{heard}")
+            text = (text + " " if text else "") + heard
+        if failed and not saved and not text:
+            await message.channel.send(f"❌ 附件下載失敗：{', '.join(failed)}")
+            _processing[message.channel.id] = False
+            return
+        if saved:
+            paths = "\n".join(saved)
+            text = (text + "\n\n" if text else "") + f"使用者上傳了以下檔案，路徑如下：\n{paths}"
+
+    if not text:
+        _processing[message.channel.id] = False
+        return
+
+    state.pop("pending_options", None)
+
+    # Speaker ID：告知 CC 是誰在說話
+    speaker = message.author.display_name
+    full_prompt = f"[{speaker}]: {text}"
+
+    # Auto-compact：context 達門檻先壓縮
+    await _maybe_auto_compact(message.channel, state)
+
+    # 目前 session 標題，顯示在思考中訊息頂部，工作時一眼知道在哪個對話
+    state["_session_label"] = await asyncio.to_thread(_session_label, state.get("session_id"))
+
+    progress_msg = await message.channel.send("⏳ **思考中...**")
+    t0 = time.time()
+    try:
+        reply, new_sid, ask_data = await _run_tracked(
+            message.channel.id, full_prompt, state, progress_msg
+        )
+        if new_sid:
+            state["session_id"] = new_sid
+            _persist_session(state)
+            # 更新標題與 bot 狀態（新對話此時才有 session 檔可讀標題）
+            state["_session_label"] = await asyncio.to_thread(_session_label, new_sid)
+            await _update_presence(message.channel.id, state["_session_label"])
+        await progress_msg.delete()
+        if ask_data:
+            await _send_ask_question(message.channel, ask_data, state)
+        elif reply and reply != "（無回應）":
+            await _send_files_and_text(message.channel, reply)
+        # 長任務完成 → @使用者推播（手機會震，可離開後再回來）
+        elapsed = time.time() - t0
+        if elapsed >= NOTIFY_AFTER_SEC:
+            tip = "需要你回答" if ask_data else "完成"
+            await message.channel.send(f"{message.author.mention} ✅ {tip} · {elapsed:.0f}s")
+        # 側欄頻道：第一句處理完 → 讀內容生成中文標題、改頻道名（只改一次）
+        if state.get("_sidebar") and not state.get("_named") and state.get("session_id"):
+            state["_named"] = True
+            asyncio.create_task(_autoname_channel(message.channel, state))
+        # 側欄頻道：最新有活動 → 移到入口下方置頂（已在頂端不動）
+        elif state.get("_sidebar"):
+            asyncio.create_task(_bump_channel_to_top(message.channel))
+    except _StoppedByUser:
+        await progress_msg.edit(content="🛑 已停止")
+    except CCError as e:
+        await _handle_cc_error(progress_msg, e, state)
+        if time.time() - t0 >= NOTIFY_AFTER_SEC:
+            await message.channel.send(f"{message.author.mention} ⚠️ 已結束（發生錯誤）")
+    except Exception as e:
+        print(f"[CC_FAIL] kind=UNCLASSIFIED raw={e!r}", flush=True)
+        detail = f"{type(e).__name__}: {e}"[:1500]
+        await progress_msg.edit(content=f"❌ 發生未預期錯誤。\n```\n{detail}\n```"[:2000])
+    finally:
+        _processing[message.channel.id] = False
+
+    await bot.process_commands(message)
+
+def _acquire_single_instance_lock() -> Optional["socket.socket"]:
+    """單一實例防呆：綁定固定本機 port，綁不上代表已有 bot 在跑，回傳 None。
+    用 socket 而非鎖檔，進程結束 port 自動釋放，不會有殘留鎖問題。"""
+    import socket
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("127.0.0.1", 47361))  # 此 port 專供本 bot 當鎖用
+        sock.listen(1)
+        return sock
+    except OSError:
+        sock.close()
+        return None
+
+if __name__ == "__main__":
+    _lock = _acquire_single_instance_lock()
+    if _lock is None:
+        print("已有另一個 bot 實例在執行，本次啟動中止。", flush=True)
+        raise SystemExit(0)
+    bot.run(DISCORD_TOKEN)
