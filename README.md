@@ -108,6 +108,10 @@ To run it **silently in the background** (no console window), double-click
 `launch_bot.vbs`. It uses the `.venv` Python if present and logs to
 `discord_bot.log`.
 
+**Control panel (optional):** double-click `control-panel.vbs` for a tiny GUI
+to **Start / Stop / Restart** the bot and **View Log** — no command line needed.
+It shows a live running/stopped status and works from the project folder.
+
 Now type a message in your bound channel — the bot should respond.
 
 ---
