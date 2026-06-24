@@ -173,7 +173,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "status_session_none": "🔗 Session: none",
         "status_model": "🤖 Model: `{model}` (fallback: `{fb}`)",
         "status_effort": "🧠 Effort: `{effort}`",
-        "status_context": "📈 Context: `[{bar}]` `{ctx}` / 1,000,000 tokens",
+        "status_context": "📈 Context: `[{bar}]` `{ctx}` / {limit} tokens",
         "default_inline": "default",
         "choice_default": "Default",
         "cmd_sessions_desc": "List past conversations and switch",
@@ -408,7 +408,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "status_session_none": "🔗 Session：無",
         "status_model": "🤖 模型：`{model}`（備援：`{fb}`）",
         "status_effort": "🧠 思考：`{effort}`",
-        "status_context": "📈 Context：`[{bar}]` `{ctx}` / 1,000,000 tokens",
+        "status_context": "📈 Context：`[{bar}]` `{ctx}` / {limit} tokens",
         "default_inline": "預設",
         "choice_default": "預設",
         "cmd_sessions_desc": "列出歷史對話並切換",
@@ -571,7 +571,8 @@ MAX_BUFFER_SIZE = 64 * 1024 * 1024         # stream-json 解析 buffer 上限（
 RETRY_MAX_ATTEMPTS = 4                       # 529/429 退避重試次數上限
 RETRY_BASE_DELAY   = 1.0                     # 退避基礎秒數
 # context 接近上限的自動壓縮門檻：依預設模型自動判斷——1M 模型→850k、標準 200K→170k
-CONTEXT_WARN_TOKENS = 850_000 if "[1m]" in DEFAULT_MODEL else 170_000
+CONTEXT_LIMIT_TOKENS = 1_000_000 if "[1m]" in DEFAULT_MODEL else 200_000   # context 視窗上限（1M 模型→1M，標準→200K）
+CONTEXT_WARN_TOKENS = int(CONTEXT_LIMIT_TOKENS * 0.85)                     # 接近上限的自動壓縮門檻＝上限的 85%
 NOTIFY_AFTER_SEC = 60                        # 任務耗時超過此秒數，完成時 @使用者推播
 INACTIVITY_TIMEOUT = 600                      # CC 連續無任何輸出超過此秒數才視為卡死（不限總時長，長工作流不會被誤殺）
 
@@ -1885,7 +1886,7 @@ async def cmd_status(interaction: discord.Interaction):
     sid = state["session_id"]
     label = await asyncio.to_thread(_session_label, sid)
     ctx = state.get("ctx_tokens", 0)
-    ctx_bar = _bar(ctx / 1_000_000 * 100)
+    ctx_bar = _bar(ctx / CONTEXT_LIMIT_TOKENS * 100)
     lines = [
         t("status_title"),
         t("status_convo", label=label),
@@ -1893,7 +1894,7 @@ async def cmd_status(interaction: discord.Interaction):
         t("status_session", id=sid[:8]) if sid else t("status_session_none"),
         t("status_model", model=state['model'] or t("default_inline"), fb=FALLBACK_MODEL),
         t("status_effort", effort=state['effort'] or t("default_inline")),
-        t("status_context", bar=ctx_bar, ctx=f"{ctx:,}"),
+        t("status_context", bar=ctx_bar, ctx=f"{ctx:,}", limit=f"{CONTEXT_LIMIT_TOKENS:,}"),
     ]
     await interaction.response.send_message("\n".join(lines))
 
