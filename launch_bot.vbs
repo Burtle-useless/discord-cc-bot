@@ -7,12 +7,17 @@ Set fso = CreateObject("Scripting.FileSystemObject")
 scriptDir = fso.GetParentFolderName(WScript.ScriptFullName)
 sh.CurrentDirectory = scriptDir
 
-' Prefer the project virtualenv (.venv) if it exists, else fall back to "python" on PATH.
-venvPy = scriptDir & "\.venv\Scripts\python.exe"
-If fso.FileExists(venvPy) Then
-  pyExe = """" & venvPy & """"
+' Find a Python to run with. Order: .venv -> venv (no dot) -> "py" launcher.
+' (A bare "python" can resolve to the Microsoft Store stub on Windows, which runs
+'  nothing and leaves an EMPTY log, so we fall back to the "py" launcher instead.)
+dotVenv = scriptDir & "\.venv\Scripts\python.exe"
+venvDir = scriptDir & "\venv\Scripts\python.exe"
+If fso.FileExists(dotVenv) Then
+  pyExe = """" & dotVenv & """"
+ElseIf fso.FileExists(venvDir) Then
+  pyExe = """" & venvDir & """"
 Else
-  pyExe = "python"
+  pyExe = "py"
 End If
 
 ' 0 = hidden window, False = do not wait. Output is logged to discord_bot.log.

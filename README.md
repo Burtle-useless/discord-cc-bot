@@ -112,6 +112,13 @@ To run it **silently in the background** (no console window), double-click
 to **Start / Stop / Restart** the bot and **View Log** — no command line needed.
 It shows a live running/stopped status and works from the project folder.
 
+> **Won't start, and the log is empty?** The launcher needs a working Python with
+> the dependencies. It looks for a virtualenv named `.venv` or `venv` in the
+> project folder, and otherwise falls back to the `py` launcher. Make sure you
+> created the venv and ran `pip install -r requirements.txt` **inside it**. (A
+> bare `python` on Windows can be the Microsoft Store stub, which silently does
+> nothing — that's the usual cause of an empty log.)
+
 Now type a message in your bound channel — the bot should respond.
 
 ---
