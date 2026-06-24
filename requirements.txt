@@ -8,5 +8,9 @@ python-dotenv>=1.2.2
 croniter>=6.2.2
 # Voice-message transcription (local Whisper speech-to-text):
 faster-whisper>=1.2.1
+#   NVIDIA GPU acceleration (optional; runs on CPU without these). Install them
+#   INTO THE SAME venv, NOT the system Python -- otherwise the bot can't load
+#   cublas64_12.dll and voice transcription fails:
+#       pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
 # PowerPoint -> PDF conversion (Windows only, requires PowerPoint installed):
 pywin32>=312

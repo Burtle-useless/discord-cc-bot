@@ -151,7 +151,10 @@ Now type a message in your bound channel — the bot should respond.
 Some features need extra packages (already listed in `requirements.txt`):
 
 - **Voice transcription** → `faster-whisper` (downloads a Whisper model on first
-  use; a CUDA GPU is used automatically if available, otherwise CPU).
+  use). Runs on **CPU** out of the box. For **NVIDIA GPU** acceleration, also run
+  `pip install nvidia-cublas-cu12 nvidia-cudnn-cu12` **inside the same venv** — a
+  common pitfall is installing them into the system Python instead, which leaves
+  the bot unable to load `cublas64_12.dll` and voice transcription fails.
 - **`/schedule`** → `croniter`.
 - **PowerPoint → PDF** → `pywin32` + Microsoft PowerPoint installed.
 
