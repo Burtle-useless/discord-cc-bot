@@ -1773,6 +1773,9 @@ async def _open_sidebar_channel(guild: discord.Guild, category: discord.Category
     _allowed_channels.add(ch.id)
     if session_id:
         _persist_session(st)
+    # position=1 是 Discord 全域絕對序，多頻道時不保證落在入口正下方；
+    # 故建完再用可靠的相對移動，把新頻道頂到入口下方第一個
+    await _bump_channel_to_top(ch)
     return ch
 
 async def _restore_session_to_channel(inter: discord.Interaction, entry: dict) -> None:
@@ -1867,6 +1870,11 @@ async def _ensure_sidebar(guild: discord.Guild) -> None:
                 entry = ch
             else:
                 _allowed_channels.add(ch.id)
+                # 旗標只存在記憶體、不寫檔，bot 重啟就消失；在此替既有側欄頻道補回，
+                # 讓重啟前就存在的舊頻道也能繼續自動置頂
+                st = get_state(ch.id)
+                st["_sidebar"] = True
+                st["_named"] = True   # 既有頻道已有名字，標記為已命名以免重啟後被自動改名
         # 入口頻道不存在就建，並固定在最上面
         if entry is None:
             entry = await guild.create_text_channel(SIDEBAR_ENTRY, category=category, position=0)
