@@ -139,6 +139,7 @@ Now type a message in your bound channel — the bot should respond.
 | `/model` | Pick the Claude model |
 | `/effort` | Pick the thinking effort level |
 | `/plan` | Set your subscription plan (applies the official 1M-context rule) |
+| `/drive` | Drive mode: voice in, voice out (on/off) |
 | `/cd`, `/pwd` | Change / show the working directory |
 | `/screenshot` | Capture the PC screen |
 | `/usage` | Show plan usage (5h / 7d) |

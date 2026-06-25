@@ -64,6 +64,20 @@ _STRINGS: dict[str, dict[str, str]] = {
         "no_response": "(no response)",
         "no_message": " (no message)",
         "stt_prompt": "",
+        "cmd_drive_desc": "Drive mode: load voice models and reply with audio (on/off)",
+        "drive_on_loading": "Drive mode ON -- loading voice models (first run downloads ~1.8GB)...",
+        "drive_on_ready": "Drive mode ready. Voice in -> voice out.",
+        "drive_xtts_fail": "Drive mode ON, but the TTS engine failed to load, so replies stay text-only (voice input still works): {ex}",
+        "drive_off": "Drive mode OFF -- voice models unloaded, VRAM freed. Back to text-only.",
+        "drive_off_voice": "Drive mode is off, so voice messages aren't transcribed. Turn it on first with /drive on.",
+        "drive_rule": (
+            " [Drive mode] When the user's message is marked as transcribed from voice input, "
+            "they are driving and listening, not reading. After your normal full text reply, "
+            "append a spoken version wrapped EXACTLY as <<<SPEAK>>> your spoken summary <<<ENDSPEAK>>>. "
+            "The spoken version is for the ear: plain natural sentences, no code, no symbols, "
+            "no bullet points, no markdown, no URLs; just say the key points concisely. "
+            "If the user's message is NOT from voice input, do not add the SPEAK block."
+        ),
         "system_prompt": (
             "You are Claude Code, invoked through a Discord bot. "
             "The user controls the files and programs on this Windows PC through Discord. "
@@ -305,6 +319,7 @@ _STRINGS: dict[str, dict[str, str]] = {
             "`/model` — pick the model\n"
             "`/effort` — pick the thinking effort\n"
             "`/plan` — set your subscription plan (controls the 1M context window)\n"
+            "`/drive on|off` — drive mode: voice in, voice out (loads/unloads local models)\n"
             "`/cd <path>` — change the working directory\n"
             "`/pwd` — current directory\n"
             "`/screenshot` — capture the PC screen\n"
@@ -349,6 +364,20 @@ _STRINGS: dict[str, dict[str, str]] = {
         "no_response": "（無回應）",
         "no_message": "（無訊息）",
         "stt_prompt": "以下是繁體中文的語音。",
+        "cmd_drive_desc": "開車模式：載入語音模型並用語音回覆（on/off）",
+        "drive_on_loading": "開車模式開啟 — 載入語音模型中（首次會下載約 1.8GB）...",
+        "drive_on_ready": "開車模式就緒。語音進、語音出。",
+        "drive_xtts_fail": "開車模式已開，但 TTS 引擎載入失敗，回覆暫時只有文字（語音輸入仍可用）：{ex}",
+        "drive_off": "開車模式關閉 — 語音模型已卸載、VRAM 已釋放，回到純文字。",
+        "drive_off_voice": "開車模式關閉中，語音訊息不會被辨識。要用請先 /drive on。",
+        "drive_rule": (
+            "【開車模式】當使用者這則訊息標明是語音輸入辨識而來，"
+            "代表他正在開車、用聽的而非用讀的。請在正常的完整文字回覆之後，"
+            "另外附一段朗讀版，嚴格用 <<<SPEAK>>> 你的口語摘要 <<<ENDSPEAK>>> 包住。"
+            "朗讀版是給耳朵聽的：自然口語句子，不要程式碼、不要符號、不要條列、"
+            "不要 markdown、不要網址，簡潔講重點即可。"
+            "若使用者這則不是語音輸入，就不要附 SPEAK 區塊。"
+        ),
         "system_prompt": (
             "你是透過 Discord bot 被呼叫的 Claude Code。"
             "使用者透過 Discord 控制這台 Windows 電腦上的檔案和程式。"
@@ -578,6 +607,7 @@ _STRINGS: dict[str, dict[str, str]] = {
             "`/model` — 選擇模型\n"
             "`/effort` — 選擇思考程度\n"
             "`/plan` — 設定訂閱方案（決定 1M context 視窗）\n"
+            "`/drive on|off` — 開車模式：語音進語音出（載入/卸載本機模型）\n"
             "`/cd <路徑>` — 切換工作目錄\n"
             "`/pwd` — 目前目錄\n"
             "`/screenshot` — 截取電腦目前畫面\n"
@@ -757,6 +787,27 @@ _account_plan: str = _load_plan()
 def _ctx_limit(state: dict) -> int:
     """該 session 目前的 context 上限：依其模型（未設則用 DEFAULT_MODEL）＋帳號方案。"""
     return context_limit_for(state.get("model") or DEFAULT_MODEL, _account_plan)
+
+# ── 開車模式持久化（語音輸入↔語音回覆的總開關）──────────────────────────────
+# 開車時 /drive on 載入 Whisper+XTTS、啟用「語音進→語音出」；在家 /drive off 全部卸載、
+# 釋放 VRAM，回到純文字 bot。全域設定（同一個 bot 一個開關），仿帳號方案存一份。
+# 預設 False（在家、不吃效能）。
+_DRIVE_FILE = _BOT_DIR / "drive_mode.json"
+
+def _load_drive() -> bool:
+    """讀開車模式狀態：檔案優先，預設 False。"""
+    try:
+        return bool(json.loads(_DRIVE_FILE.read_text()).get("drive"))
+    except Exception:
+        return False
+
+def _save_drive(on: bool) -> None:
+    try:
+        _DRIVE_FILE.write_text(json.dumps({"drive": on}))
+    except Exception:
+        pass
+
+_drive_mode: bool = _load_drive()
 
 # ── 允許頻道持久化（可加開多個頻道並行跑工作）──────────────────────────────
 _CHANNELS_FILE = _BOT_DIR / "allowed_channels.json"
@@ -1200,8 +1251,11 @@ async def run_claude(
         # 內含 LaTeX 錢字號、反引號、或無法用系統編碼表示的 Unicode 數學符號時，
         # 會讓 init 的控制訊息損毀，導致 Control request timeout: initialize 卡死 60s。
         # 因此這裡一律「用文字描述規則」，不嵌入這些危險字元本身。
-        # 啟用協作時附加同為純文字的 coord_rule（仍不含危險字元）；未啟用則完全不變。
-        system_prompt=(t("system_prompt") + t("coord_rule")) if COORD_ENABLED else t("system_prompt"),
+        # 啟用協作時附加純文字 coord_rule、開車模式附加 drive_rule（皆不含危險字元）；
+        # 兩者都未啟用則與原本完全相同。
+        system_prompt=t("system_prompt")
+        + (t("coord_rule") if COORD_ENABLED else "")
+        + (t("drive_rule") if _drive_mode else ""),
     )
     if state.get("session_id"):
         options.resume = state["session_id"]
@@ -1369,6 +1423,33 @@ def _capture_screenshot_sync() -> Optional[Path]:
 async def _capture_screenshot() -> Optional[Path]:
     return await asyncio.to_thread(_capture_screenshot_sync)
 
+# ── GPU 共用工具（Whisper 與 XTTS 都會用到）──────────────────────────────
+def _add_cuda_dll_path() -> None:
+    """把 nvidia cuda_runtime/cuBLAS/cuDNN/nvrtc 的 DLL 目錄加進 PATH，否則 GPU 推論時
+    ctranslate2/torch 會找不到 cublas64_12.dll（它走 PATH，不吃 add_dll_directory）。"""
+    import importlib
+    dirs: list[str] = []
+    for pkg in ("nvidia.cuda_runtime", "nvidia.cublas", "nvidia.cudnn", "nvidia.cuda_nvrtc"):
+        try:
+            mod = importlib.import_module(pkg)
+            bindir = Path(mod.__path__[0]) / "bin"
+            if bindir.is_dir():
+                dirs.append(str(bindir))
+        except Exception:
+            pass
+    if dirs:
+        os.environ["PATH"] = os.pathsep.join(dirs) + os.pathsep + os.environ.get("PATH", "")
+
+def _free_vram() -> None:
+    """強制回收記憶體與 GPU 顯存（卸載模型後呼叫）。"""
+    import gc
+    gc.collect()
+    try:
+        import torch
+        torch.cuda.empty_cache()
+    except Exception:
+        pass  # 純 CPU 環境沒裝 torch 就略過
+
 # ── 語音轉文字（faster-whisper，本機 GPU，開車用）────────────────────────
 _whisper_model = None  # 單例，只載入一次
 
@@ -1376,20 +1457,7 @@ def _get_whisper():
     """延遲載入 Whisper 模型（單例）；首次會下載 large-v3 並載入 GPU。GPU 起不來自動退 CPU。"""
     global _whisper_model
     if _whisper_model is None:
-        import importlib
-        # 把 nvidia cuda_runtime/cuBLAS/cuDNN/nvrtc 的 DLL 目錄加進 PATH，
-        # 否則 GPU 轉錄時 ctranslate2 會找不到 cublas64_12.dll（它走 PATH，不吃 add_dll_directory）
-        _dirs = []
-        for pkg in ("nvidia.cuda_runtime", "nvidia.cublas", "nvidia.cudnn", "nvidia.cuda_nvrtc"):
-            try:
-                mod = importlib.import_module(pkg)
-                bindir = Path(mod.__path__[0]) / "bin"
-                if bindir.is_dir():
-                    _dirs.append(str(bindir))
-            except Exception:
-                pass
-        if _dirs:
-            os.environ["PATH"] = os.pathsep.join(_dirs) + os.pathsep + os.environ.get("PATH", "")
+        _add_cuda_dll_path()
         from faster_whisper import WhisperModel
         try:
             # 8GB VRAM 跑 large-v3 float16 綽綽有餘
@@ -1406,6 +1474,51 @@ def _transcribe(path: str) -> str:
     # 不鎖語言（自動偵測，相容中英混講）；initial_prompt 偏向繁體中文
     segments, _info = model.transcribe(path, beam_size=5, initial_prompt=t("stt_prompt"))
     return "".join(seg.text for seg in segments).strip()
+
+def _unload_whisper() -> None:
+    """卸載 Whisper 模型、釋放顯存（開車模式關閉時呼叫）。"""
+    global _whisper_model
+    if _whisper_model is not None:
+        _whisper_model = None
+        _free_vram()
+
+# ── 文字轉語音（XTTS-v2，本機 GPU，開車回覆用）────────────────────────────
+# 注意：XTTS-v2 模型授權為 Coqui Public Model License（CPML），禁止商用。屬選配功能，
+# 預設關閉（只有開車模式會載入）；下游若要商用請改用其他引擎或自負授權責任。
+_xtts_model = None  # 單例，只載入一次
+
+def _get_xtts():
+    """延遲載入 XTTS-v2（單例）；首次會下載模型約 1.8GB。GPU 起不來自動退 CPU。"""
+    global _xtts_model
+    if _xtts_model is None:
+        _add_cuda_dll_path()
+        from TTS.api import TTS
+        try:
+            _xtts_model = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to("cuda")
+            print("[XTTS] xtts_v2 已載入 GPU", flush=True)
+        except Exception as e:
+            print(f"[XTTS] GPU 失敗，改用 CPU：{e}", flush=True)
+            _xtts_model = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to("cpu")
+    return _xtts_model
+
+def _unload_xtts() -> None:
+    """卸載 XTTS 模型、釋放顯存（開車模式關閉時呼叫）。"""
+    global _xtts_model
+    if _xtts_model is not None:
+        _xtts_model = None
+        _free_vram()
+
+def _xtts_language() -> str:
+    """朗讀語言：跟著介面語系（zh-TW -> 中文、其餘 -> 英文）。"""
+    return "zh-cn" if BOT_LANG == "zh-TW" else "en"
+
+def _synthesize(text: str, out_path: str) -> str:
+    """把文字合成成語音檔（阻塞式，呼叫端用 asyncio.to_thread 包起來）。回傳檔案路徑。"""
+    model = _get_xtts()
+    # XTTS-v2 是聲音克隆模型，需指定內建說話者；language 跟著介面語系
+    model.tts_to_file(text=text, file_path=out_path,
+                      speaker="Ana Florence", language=_xtts_language())
+    return out_path
 
 # ── 簡報轉 PDF（簡報是視覺導向，轉 PDF 讓 CC 逐頁視覺讀取更準）────────────
 def _pptx_to_pdf_sync(src: Path) -> Optional[Path]:
@@ -1501,6 +1614,36 @@ async def _send_files_and_text(channel, text: str) -> None:
             await channel.send(file=discord.File(str(fp)))
         except Exception as e:
             await channel.send(t("file_upload_failed", name=fp.name, e=e))
+
+# ── 開車模式語音回覆：把 CC 附的朗讀版抽出來合成語音檔 ─────────────────────
+_SPEAK_MARKER = re.compile(r"<<<SPEAK>>>(.*?)<<<ENDSPEAK>>>", re.DOTALL)
+
+async def _voice_reply(channel, reply: str, speak: bool) -> str:
+    """處理 CC 回覆裡的朗讀版（<<<SPEAK>>>...<<<ENDSPEAK>>>）標記。
+    speak=True（開車模式＋語音輸入）：抽出朗讀版、合成語音檔上傳，回傳「去掉標記」的
+    純文字（文字版照常完整顯示）。speak=False 或無標記：只把殘留標記清乾淨後回傳。
+    任何 TTS 失敗都降級為純文字，不影響文字回覆。"""
+    m = _SPEAK_MARKER.search(reply)
+    if not m:
+        return reply
+    clean = _SPEAK_MARKER.sub("", reply).strip()
+    if not speak:
+        return clean
+    spoken = m.group(1).strip()
+    if not spoken:
+        return clean
+    try:
+        out = Path(__file__).parent / "tmp" / f"speak_{uuid.uuid4().hex[:8]}.wav"
+        out.parent.mkdir(exist_ok=True)
+        await asyncio.to_thread(_synthesize, spoken, str(out))
+        await channel.send(file=discord.File(str(out)))
+        try:
+            out.unlink()
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"[XTTS] 合成失敗，降級純文字：{e}", flush=True)
+    return clean
 
 # ── 分段送訊息 ─────────────────────────────────────────────────────────
 async def send_long(channel, text: str):
@@ -1970,8 +2113,16 @@ async def on_ready():
     await bot.tree.sync()
     print(t("ready_log", user=bot.user), flush=True)
     asyncio.create_task(_schedule_loop())
-    # 背景預載 Whisper 模型，讓第一則語音訊息就快（首次會下載 large-v3 約 1.5GB）
-    asyncio.create_task(asyncio.to_thread(_get_whisper))
+    # 開車模式：上次關機時若為開啟，重啟自動恢復載入兩個模型（開車中崩潰可自癒）；
+    # 在家（預設 off）則完全不載入語音模型，不吃 GPU/VRAM。
+    if _drive_mode:
+        asyncio.create_task(asyncio.to_thread(_get_whisper))
+        async def _bg_xtts() -> None:
+            try:
+                await asyncio.to_thread(_get_xtts)
+            except Exception as e:
+                print(f"[XTTS] 預載失敗：{e}", flush=True)
+        asyncio.create_task(_bg_xtts())
     # 多 session 側欄：註冊常駐按鈕 + 確保分類/入口頻道存在
     bot.add_view(NewChatView())   # 讓重啟前發出的按鈕仍可點
     main_ch = bot.get_channel(ALLOWED_CHANNEL)
@@ -2266,6 +2417,36 @@ async def cmd_plan(interaction: discord.Interaction, plan: str):
     # 依官方規則回報：這個方案下 Opus 會不會「自動」拿到 1M
     msg = t("plan_set_auto", plan=plan) if plan in _AUTO_1M_PLANS else t("plan_set_std", plan=plan)
     await interaction.response.send_message(msg)
+
+@bot.tree.command(name="drive", description=t("cmd_drive_desc"))
+@discord.app_commands.choices(mode=[
+    discord.app_commands.Choice(name="on",  value="on"),
+    discord.app_commands.Choice(name="off", value="off"),
+])
+async def cmd_drive(interaction: discord.Interaction, mode: str):
+    # 開車模式是帳號全域開關（控制兩個 GPU 模型的生命週期），限主帳號設定
+    if not await check_auth(interaction, owner_only=True): return
+    global _drive_mode
+    if mode == "on":
+        _drive_mode = True
+        _save_drive(True)   # 立刻存檔，重啟後自動恢復載入
+        # 載入兩個模型耗時（首次還要下載），先即時回「載入中」避免互動 3 秒逾時
+        await interaction.response.send_message(t("drive_on_loading"))
+        await asyncio.to_thread(_get_whisper)
+        try:
+            await asyncio.to_thread(_get_xtts)
+        except Exception as e:
+            # TTS 載入失敗：語音輸入仍可用，只是不能語音回覆（仍維持開車模式）
+            await interaction.followup.send(t("drive_xtts_fail", ex=e))
+            return
+        await interaction.followup.send(t("drive_on_ready"))
+    else:
+        _drive_mode = False
+        _save_drive(False)
+        # 卸載兩個模型、釋放 VRAM，回到純文字 bot
+        await asyncio.to_thread(_unload_whisper)
+        await asyncio.to_thread(_unload_xtts)
+        await interaction.response.send_message(t("drive_off"))
 
 @bot.tree.command(name="cd", description=t("cmd_cd_desc"))
 async def cmd_cd(interaction: discord.Interaction, path: str):
@@ -2601,6 +2782,7 @@ async def on_message(message: discord.Message):
             return
 
     _processing[message.channel.id] = True
+    is_voice = False  # 這則是否來自語音輸入（決定要不要語音回覆）
 
     # 處理附件
     if message.attachments:
@@ -2609,10 +2791,14 @@ async def on_message(message: discord.Message):
         saved: list[str] = []
         failed: list[str] = []
         voice_texts: list[str] = []
+        voice_blocked = False  # 開車模式關閉時收到語音 → 標記，迴圈後提示
         for att in message.attachments:
             dest = tmp_dir / att.filename
             # 語音訊息 → 本機 STT 轉文字（CC 讀不了音訊），不當檔案路徑給 CC
             if (att.content_type or "").startswith("audio/"):
+                if not _drive_mode:
+                    voice_blocked = True  # 在家關閉中，不載模型、不轉錄
+                    continue
                 try:
                     req = urllib.request.Request(att.url, headers={"User-Agent": "Mozilla/5.0"})
                     with urllib.request.urlopen(req) as r, open(dest, "wb") as f:
@@ -2637,11 +2823,15 @@ async def on_message(message: discord.Message):
                 failed.append(t("attach_fail_item", filename=att.filename, ex=ex))
         # 語音辨識結果當成使用者打的字
         if voice_texts:
+            is_voice = True
             heard = " ".join(voice_texts)
             await message.channel.send(t("heard", heard=heard))
             # 顯示給使用者的是乾淨原文；送給 CC 的另外包一層提示，
             # 標明這是語音辨識結果、可能有怪字，請 CC 依上下文推斷原意
             text = (text + " " if text else "") + t("voice_hint", heard=heard)
+        # 開車模式關閉時收到語音 → 提示要先開（文字附件仍照常處理）
+        if voice_blocked and not voice_texts:
+            await message.channel.send(t("drive_off_voice"))
         if failed and not saved and not text:
             await message.channel.send(t("attach_failed", failed=', '.join(failed)))
             _processing[message.channel.id] = False
@@ -2682,6 +2872,8 @@ async def on_message(message: discord.Message):
         if ask_data:
             await _send_ask_question(message.channel, ask_data, state)
         elif reply and reply != _NO_RESPONSE:
+            # 開車模式＋這則是語音輸入 → 解析朗讀版、合成語音檔；回傳去掉標記的文字版
+            reply = await _voice_reply(message.channel, reply, speak=(is_voice and _drive_mode))
             await _send_files_and_text(message.channel, reply)
         # 長任務完成 → @使用者推播（手機會震，可離開後再回來）
         elapsed = time.time() - t0

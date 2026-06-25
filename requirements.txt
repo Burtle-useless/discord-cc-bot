@@ -12,5 +12,9 @@ faster-whisper>=1.2.1
 #   INTO THE SAME venv, NOT the system Python -- otherwise the bot can't load
 #   cublas64_12.dll and voice transcription fails:
 #       pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
+# Drive-mode voice REPLY (local XTTS-v2 text-to-speech). Only used when you turn on
+# /drive. Heavy install (torch etc.) and the XTTS-v2 model is under the Coqui Public
+# Model License (CPML), which FORBIDS commercial use. Uncomment only if that's OK:
+#       coqui-tts>=0.24.1
 # PowerPoint -> PDF conversion (Windows only, requires PowerPoint installed):
 pywin32>=312

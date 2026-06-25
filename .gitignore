@@ -9,6 +9,7 @@ schedules.json
 session_titles.json
 last_version.json
 account_plan.json
+drive_mode.json
 
 # Logs
 *.log
