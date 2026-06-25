@@ -315,6 +315,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         # 一般訊息
         "busy_prev": "⏳ Still handling the previous message, please try again shortly.",
         "heard": "🎤 Heard: {heard}",
+        "voice_hint": "(The following was transcribed from voice input and may contain homophones or misrecognized words; please infer my intended meaning from context before responding): {heard}",
         "attach_failed": "❌ Attachment download failed: {failed}",
         "uploaded_files": "The user uploaded the following files (paths):\n{paths}",
         "thinking": "⏳ **Thinking...**",
@@ -581,6 +582,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         ),
         "busy_prev": "⏳ 還在處理上一則訊息，請稍後再試。",
         "heard": "🎤 聽到：{heard}",
+        "voice_hint": "（以下內容由語音輸入辨識而來，可能含同音字或辨識錯誤的怪字，請依上下文推斷我的原意再回應）：{heard}",
         "attach_failed": "❌ 附件下載失敗：{failed}",
         "uploaded_files": "使用者上傳了以下檔案，路徑如下：\n{paths}",
         "thinking": "⏳ **思考中...**",
@@ -2563,7 +2565,9 @@ async def on_message(message: discord.Message):
         if voice_texts:
             heard = " ".join(voice_texts)
             await message.channel.send(t("heard", heard=heard))
-            text = (text + " " if text else "") + heard
+            # 顯示給使用者的是乾淨原文；送給 CC 的另外包一層提示，
+            # 標明這是語音辨識結果、可能有怪字，請 CC 依上下文推斷原意
+            text = (text + " " if text else "") + t("voice_hint", heard=heard)
         if failed and not saved and not text:
             await message.channel.send(t("attach_failed", failed=', '.join(failed)))
             _processing[message.channel.id] = False
