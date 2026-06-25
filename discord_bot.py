@@ -305,6 +305,19 @@ _STRINGS: dict[str, dict[str, str]] = {
         "cmd_removechannel_desc": "Remove the current channel from the allowlist (owner only)",
         "removechannel_cant_main": "❌ Can't remove the main channel.",
         "removechannel_done": "✅ Removed this channel from the allowlist.",
+        "cmd_handoff_desc": "Generate a handoff brief of this conversation to continue on another machine",
+        "handoff_generating": "📝 Generating a handoff brief (using your current session model)...",
+        "handoff_empty": "Nothing to hand off yet — this channel has no active conversation.",
+        "handoff_caption": "📋 **Handoff brief** — paste this into the Claude Code box on the other machine to continue:",
+        "handoff_prompt": (
+            "You are about to hand this conversation off to a fresh Claude Code instance on another computer. "
+            "Write a complete, self-contained handoff brief in English, addressed to that other Claude Code in the second person. "
+            "It cannot read any of our files, so embed every necessary detail (key code, names, paths, settings) directly in the brief — "
+            "never tell it to 'go look at some file'. "
+            "Use these sections: Background and goal; Current progress and conclusions; Key decisions and why; "
+            "To-do and next steps; Notes and constraints (including the user's preferences). "
+            "Output only the brief itself. Here is the conversation (head and tail, middle elided as [...]):"
+        ),
         "cmd_help_desc": "Show all commands",
         "help_text": (
             "**🤖 Claude Code Bot**\n\n"
@@ -315,6 +328,7 @@ _STRINGS: dict[str, dict[str, str]] = {
             "`/continue` — resume the previous session\n"
             "`/sessions` — switch to a past conversation\n"
             "`/search <keyword>` — search past conversation content\n"
+            "`/handoff` — generate a handoff brief to continue on another machine\n"
             "`/status` — current status\n"
             "`/model` — pick the model\n"
             "`/effort` — pick the thinking effort\n"
@@ -593,6 +607,19 @@ _STRINGS: dict[str, dict[str, str]] = {
         "cmd_removechannel_desc": "把目前頻道移出可用清單（主帳號限定）",
         "removechannel_cant_main": "❌ 無法移除主頻道。",
         "removechannel_done": "✅ 已把這個頻道移出可用清單。",
+        "cmd_handoff_desc": "把目前對話生成交接稿，換另一台電腦接手",
+        "handoff_generating": "📝 正在生成交接稿（用你目前 session 的模型）...",
+        "handoff_empty": "目前沒有可交接的內容 — 這個頻道還沒有進行中的對話。",
+        "handoff_caption": "📋 **交接稿** — 把下面貼到另一台電腦的 Claude Code 輸入框就能接手：",
+        "handoff_prompt": (
+            "你要把這段對話交接給另一台電腦上、全新的 Claude Code 接手。"
+            "請用繁體中文寫一份完整、可獨立閱讀的交接稿，以第二人稱對那台 Claude Code 說話。"
+            "對方讀不到我們這邊的任何檔案，所以必要細節（關鍵程式碼、命名、路徑、設定）要直接寫進交接稿裡，"
+            "不要叫對方「去看某個檔案」。"
+            "請用這幾個段落組織：背景與目標；目前進度與結論；已做的關鍵決策與理由；待辦與下一步；"
+            "注意事項與限制（含使用者的偏好）。"
+            "只輸出交接稿本身。以下是對話內容（取頭尾，中間以 [...] 省略）："
+        ),
         "cmd_help_desc": "顯示所有指令",
         "help_text": (
             "**🤖 Claude Code Bot**\n\n"
@@ -603,6 +630,7 @@ _STRINGS: dict[str, dict[str, str]] = {
             "`/continue` — 繼續上次 session\n"
             "`/sessions` — 切換歷史對話\n"
             "`/search <關鍵字>` — 搜尋歷史對話內容\n"
+            "`/handoff` — 生成交接稿，換另一台電腦接手\n"
             "`/status` — 目前狀態\n"
             "`/model` — 選擇模型\n"
             "`/effort` — 選擇思考程度\n"
@@ -1123,8 +1151,11 @@ def _save_title(session_id: str, title: str) -> None:
     except Exception:
         pass
 
-def _read_session_text(session_id: str, max_chars: int = 3000) -> str:
-    """讀出 session 的對話文字（使用者+助理），供生成標題用。"""
+def _read_session_text(session_id: str, max_chars: int = 3000, keep: str = "head") -> str:
+    """讀出 session 的對話文字（使用者+助理）。
+    keep="head"：從頭累積到 max_chars（生成標題用，行為不變）。
+    keep="both"：讀完整段後取頭尾各半、中間以省略標記接起，
+    讓交接稿同時保留「原始目標」與「最近進度」兩端。"""
     claude_home = Path.home() / ".claude" / "projects"
     parts: list[str] = []
     for jf in claude_home.glob(f"*/{session_id}.jsonl"):
@@ -1148,19 +1179,26 @@ def _read_session_text(session_id: str, max_chars: int = 3000) -> str:
                     txt = _BOT_PROMPT_RE.sub("", txt.strip())
                     if txt:
                         parts.append(txt)
-                    if sum(len(p) for p in parts) > max_chars:
+                    # head 模式：累積到上限就停；both 模式：讀完整段再裁頭尾
+                    if keep == "head" and sum(len(p) for p in parts) > max_chars:
                         break
         except Exception:
             pass
         break
-    return "\n".join(parts)[:max_chars]
+    full = "\n".join(parts)
+    if keep == "both" and len(full) > max_chars:
+        half = max_chars // 2
+        return full[:half] + "\n\n[...]\n\n" + full[-half:]
+    return full[:max_chars]
 
-async def _ask_haiku(prompt: str) -> str:
-    """一次性、不留 session 檔的 Haiku 呼叫（給生成標題用）。"""
+async def _ask_haiku(prompt: str, model: Optional[str] = "claude-haiku-4-5-20251001") -> str:
+    """一次性、不留 session 檔的輕量呼叫。
+    預設用 Haiku（生成標題用）；交接稿改傳當前 session 模型以品質優先。
+    model=None 時交由 CLI 用帳號預設模型。"""
     opts = ClaudeAgentOptions(
         cwd=str(DEFAULT_DIR),
         cli_path=CLAUDE_CLI,
-        model="claude-haiku-4-5-20251001",
+        model=model,
         permission_mode="bypassPermissions",
         extra_args={"no-session-persistence": None},  # 不寫 session 檔，避免污染
     )
@@ -1188,6 +1226,15 @@ async def _generate_title(session_id: str) -> Optional[str]:
     title = (raw or "").strip().splitlines()[0] if raw else ""
     title = title.strip('「」"\'*#＊ 　')[:25]   # 去掉引號、markdown 符號、前後空白
     return title or None
+
+async def _generate_handoff(session_id: str, model: Optional[str]) -> Optional[str]:
+    """讀目前 session 的頭尾內容，用當前 session 模型生成一份交接稿，
+    讓另一台電腦的全新 CC 貼上就能接手（對方讀不到本機檔案，故細節直接寫進稿裡）。"""
+    text = _read_session_text(session_id, max_chars=50000, keep="both")
+    if not text:
+        return None
+    raw = await _ask_haiku(t("handoff_prompt") + "\n\n" + text, model=model)
+    return (raw or "").strip() or None
 
 def _list_sessions(scope: str = "mine", limit: int = 15) -> list[dict]:
     """掃所有專案列出 session，依時間新到舊。
@@ -2634,6 +2681,23 @@ async def cmd_usage(interaction: discord.Interaction):
         return
     lines.append(t("usage_cache_note"))
     await interaction.followup.send("\n".join(lines))
+
+@bot.tree.command(name="handoff", description=t("cmd_handoff_desc"))
+async def cmd_handoff(interaction: discord.Interaction):
+    if not await check_auth(interaction): return
+    state = get_state(interaction.channel_id)
+    sid = state.get("session_id")
+    if not sid:
+        await interaction.response.send_message(t("handoff_empty"), ephemeral=True)
+        return
+    await interaction.response.defer()
+    await interaction.followup.send(t("handoff_generating"))
+    doc = await _generate_handoff(sid, state.get("model"))
+    if not doc:
+        await interaction.followup.send(t("handoff_empty"))
+        return
+    # send_long：短的直接貼成訊息（可複製）、長的存成 .md 上傳
+    await send_long(interaction.channel, t("handoff_caption") + "\n\n" + doc)
 
 @bot.tree.command(name="schedule", description=t("cmd_schedule_desc"))
 async def cmd_schedule(interaction: discord.Interaction, task: str):
