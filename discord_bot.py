@@ -26,6 +26,9 @@ from claude_agent_sdk import (
 from claude_agent_sdk._errors import MessageParseError
 from claude_agent_sdk._internal.message_parser import parse_message
 
+import wt_core  # 本地模組：git worktree 平行協作核心邏輯
+import coord_core  # 本地模組：跨頻道協作（AI Lounge）核心邏輯
+
 try:
     from croniter import croniter as _croniter
     _HAS_CRONITER = True
@@ -88,6 +91,18 @@ _STRINGS: dict[str, dict[str, str]] = {
             "When you see code in the project you don't remember, do not assert it was another session or wasn't you; "
             "verify with git log, file mtimes, or the compaction summary, and if you can't, honestly say you're unsure whether it was you — never fabricate a source."
         ),
+        # 跨頻道協作（AI Lounge）。coord_rule 會在啟用時附加到 system_prompt 後面，
+        # 因此一律用文字描述、不嵌入反引號/錢字號等會破壞 Windows init 的危險字元。
+        "coord_rule": (
+            " [Coordination] You share this machine with other Discord channels, each its own session. "
+            "Before starting work that touches shared files or running destructive commands, "
+            "first read the recent activity from other channels shown at the top of the user message. "
+            "When you begin a notable task, announce it once with a marker (keep the brackets): "
+            "[[COORD: short one-line summary]] — the bot strips it from your reply and broadcasts it to other channels. "
+            "Keep summaries short and free of backticks or dollar signs."
+        ),
+        "coord_prompt_prefix": "[Recent activity in other channels]\n{feed}\n[End recent activity]\n\n",
+        "coord_broadcast": "🛰️ **#{name}**: {task}",
         # 自動壓縮
         "compact_prompt": (
             "/compact When compacting, fully preserve: the changes actually made in this conversation "
@@ -169,6 +184,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "status_title": "**📊 Current status**",
         "status_convo": "💬 Chat: **{label}**",
         "status_dir": "📂 Dir: `{cwd}`",
+        "status_worktree": "🌿 Worktree: `{branch}` (base `{base}`)",
         "status_session": "🔗 Session: `{id}...`",
         "status_session_none": "🔗 Session: none",
         "status_model": "🤖 Model: `{model}` (fallback: `{fb}`)",
@@ -199,6 +215,26 @@ _STRINGS: dict[str, dict[str, str]] = {
         "cd_not_found": "❌ Directory doesn't exist: `{path}`",
         "cd_done": "📂 Switched to `{p}`",
         "cmd_pwd_desc": "Show the current working directory",
+        "pwd_with_wt": "📂 `{cwd}`\n🌿 branch `{branch}`",
+        # worktree 平行協作
+        "cmd_worktree_desc": "Parallel work: give this channel its own git worktree (branch)",
+        "wt_on_done": "🌿 Worktree on. Branch `{branch}` (from `{base}`)\n📂 `{path}`\nEdits here stay isolated until /worktree merge or /worktree off.",
+        "wt_already_on": "🌿 Already on a worktree: branch `{branch}`\n📂 `{path}`",
+        "wt_not_on": "This channel isn't on a worktree.",
+        "wt_off_done": "✅ Worktree removed. Branch `{branch}` kept (work preserved).\n📂 Back to `{cwd}`",
+        "wt_off_dirty": "⚠️ Can't remove — there are uncommitted changes. Commit or discard them first.\n```\n{err}\n```",
+        "wt_merge_done": "✅ Merged `{branch}` into `{base}`, removed the worktree and deleted the branch.\n📂 Back to `{cwd}`",
+        "wt_merge_conflict": "⚠️ Merge conflict (`{branch}` → `{base}`). Aborted — nothing changed.\nConflicting files:\n```\n{files}\n```\nFix it in the worktree (merge `{base}` in, resolve, commit), then /worktree merge again.",
+        "wt_merge_wt_dirty": "⚠️ The worktree has uncommitted changes. Commit them first, then /worktree merge.",
+        "wt_merge_repo_dirty": "⚠️ The main repo (`{base}`) has uncommitted changes. Commit or stash them there first.",
+        "wt_merge_not_on_base": "⚠️ The main repo isn't on `{base}` (it's on `{cur}`). Switch it back to `{base}` first.",
+        "wt_list_none": "No worktrees (this dir isn't a git repo, or none created yet).",
+        "wt_list_title": "**🌿 Worktrees**",
+        "wt_list_item": "• `{branch}` → `{path}`",
+        "wt_err_not_repo": "❌ Current dir isn't a git repo. Use /cd into a repo first.",
+        "wt_err_no_base": "❌ Can't read the current branch (detached HEAD?). Checkout a branch first.",
+        "wt_err_path_exists": "❌ A worktree folder for this name already exists. Use /worktree off first, or pick another name.",
+        "wt_err_git": "❌ git worktree failed:\n```\n{err}\n```",
         "cmd_screenshot_desc": "Capture the PC's current screen",
         "screenshot_failed": "❌ Screenshot failed.",
         "screenshot_too_large": "❌ Screenshot file too large to upload.",
@@ -334,6 +370,18 @@ _STRINGS: dict[str, dict[str, str]] = {
             "看到專案裡你不記得的程式碼時，不要斷言是別的 session 做的、或不是你做的；"
             "先用 git log、檔案修改時間、或壓縮摘要查證，查不到就如實說無法確定是否為你先前所做，絕不杜撰來源。"
         ),
+        # 跨頻道協作（AI Lounge）。coord_rule 啟用時會附加到 system_prompt 後面，
+        # 因此一律用文字描述、不嵌入反引號/錢字號等會破壞 Windows init 的危險字元。
+        "coord_rule": (
+            "【協作】你和其他 Discord 頻道共用這台機器，每個頻道是各自獨立的 session。"
+            "在開始會動到共享檔案的工作、或執行破壞性指令前，"
+            "請先讀使用者訊息最上方列出的其他頻道近期活動。"
+            "當你要開始一項重要工作時，用標記宣告一次（方括號照打）："
+            "[[COORD: 一行簡短說明]]——bot 會把它從你的回覆移除並廣播給其他頻道。"
+            "說明請簡短，不要含反引號或錢字號。"
+        ),
+        "coord_prompt_prefix": "【其他頻道近期活動】\n{feed}\n【近期活動結束】\n\n",
+        "coord_broadcast": "🛰️ **#{name}**：{task}",
         "compact_prompt": (
             "/compact 壓縮時務必完整保留：本次對話實際完成的改動"
             "（檔案路徑、新增或修改的函式與指令與欄位名稱）、版本號變動、尚未完成的待辦。"
@@ -404,6 +452,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "status_title": "**📊 目前狀態**",
         "status_convo": "💬 對話：**{label}**",
         "status_dir": "📂 目錄：`{cwd}`",
+        "status_worktree": "🌿 Worktree：`{branch}`（base `{base}`）",
         "status_session": "🔗 Session：`{id}...`",
         "status_session_none": "🔗 Session：無",
         "status_model": "🤖 模型：`{model}`（備援：`{fb}`）",
@@ -434,6 +483,26 @@ _STRINGS: dict[str, dict[str, str]] = {
         "cd_not_found": "❌ 目錄不存在：`{path}`",
         "cd_done": "📂 切換到 `{p}`",
         "cmd_pwd_desc": "顯示目前工作目錄",
+        "pwd_with_wt": "📂 `{cwd}`\n🌿 分支 `{branch}`",
+        # worktree 平行協作
+        "cmd_worktree_desc": "平行協作：給這個頻道專屬的 git worktree（獨立分支）",
+        "wt_on_done": "🌿 已開啟 worktree。分支 `{branch}`（源自 `{base}`）\n📂 `{path}`\n在這裡的改動會獨立隔離，直到你 /worktree merge 或 /worktree off。",
+        "wt_already_on": "🌿 已經在 worktree 上了：分支 `{branch}`\n📂 `{path}`",
+        "wt_not_on": "這個頻道目前沒有開 worktree。",
+        "wt_off_done": "✅ 已移除 worktree。分支 `{branch}` 保留（工作不會遺失）。\n📂 回到 `{cwd}`",
+        "wt_off_dirty": "⚠️ 無法移除——有未提交的變更，請先提交或捨棄。\n```\n{err}\n```",
+        "wt_merge_done": "✅ 已把 `{branch}` 合併進 `{base}`，並移除 worktree、刪除分支。\n📂 回到 `{cwd}`",
+        "wt_merge_conflict": "⚠️ 合併衝突（`{branch}` → `{base}`），已中止，什麼都沒改動。\n衝突檔案：\n```\n{files}\n```\n請在 worktree 裡解決（先把 `{base}` 併進來、修正、提交）後再 /worktree merge。",
+        "wt_merge_wt_dirty": "⚠️ worktree 還有未提交的變更，請先提交再 /worktree merge。",
+        "wt_merge_repo_dirty": "⚠️ 主 repo（`{base}`）有未提交的變更，請先在那邊提交或暫存。",
+        "wt_merge_not_on_base": "⚠️ 主 repo 目前不在 `{base}`（在 `{cur}`）。請先切回 `{base}` 再合併。",
+        "wt_list_none": "沒有 worktree（此目錄不是 git repo，或尚未建立）。",
+        "wt_list_title": "**🌿 Worktree 清單**",
+        "wt_list_item": "• `{branch}` → `{path}`",
+        "wt_err_not_repo": "❌ 目前目錄不是 git repo。請先用 /cd 切到 repo。",
+        "wt_err_no_base": "❌ 讀不到目前分支（detached HEAD？）。請先 checkout 一個分支。",
+        "wt_err_path_exists": "❌ 這個名字的 worktree 資料夾已存在。請先 /worktree off，或換個名字。",
+        "wt_err_git": "❌ git worktree 失敗：\n```\n{err}\n```",
         "cmd_screenshot_desc": "截取電腦目前畫面",
         "screenshot_failed": "❌ 截圖失敗。",
         "screenshot_too_large": "❌ 截圖檔案過大，無法上傳。",
@@ -558,6 +627,11 @@ USAGE_CACHE_SEC = 180
 ALLOWED_CHANNEL = int(_require_env("ALLOWED_CHANNEL"))
 ALLOWED_USER    = int(_require_env("ALLOWED_USER"))
 UPDATE_CHANNEL  = int(os.environ.get("UPDATE_CHANNEL") or 0)   # 更新公告推送頻道（選填，0=停用）
+# 跨頻道協作（AI Lounge）：開啟後各頻道 session 會在 prompt 收到其他頻道的近期活動，
+# 並可用 [[COORD: ...]] 廣播。預設關閉 → 行為與未啟用時完全相同（零影響）。
+COORD_ENABLED   = (os.environ.get("COORD_ENABLED") or "").strip().lower() in ("1", "true", "yes", "on")
+COORD_CHANNEL   = int(os.environ.get("COORD_CHANNEL") or 0)   # 協作廣播頻道（選填，0=只更新登錄表、不發頻道）
+_coord_registry = coord_core.Registry()   # 記憶體版「頻道→近期活動」登錄表（單例）
 # 側欄分類／入口頻道名稱（選填）。同一個伺服器要跑多個 bot 時，各 bot 設不同的
 # SIDEBAR_CATEGORY 就不會互搶同一個分類（否則兩個 bot 會一起搶「CC 對話」而衝突）。
 SIDEBAR_CATEGORY = os.environ.get("SIDEBAR_CATEGORY") or "CC 對話"   # 多 session 側欄的分類容器名
@@ -756,6 +830,7 @@ def _persist_session(state: dict) -> None:
             "model": state.get("model"),
             "effort": state.get("effort"),
             "cwd": str(state.get("cwd") or DEFAULT_DIR),
+            "wt": state.get("wt"),   # worktree 模式資訊（None 表示未啟用）
         }
         _SESSION_FILE.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     except Exception:
@@ -781,6 +856,12 @@ async def _run_tracked(
     progress_msg: Optional[discord.Message],
 ) -> tuple[str, Optional[str], Optional[dict]]:
     """把 run_claude 包成可取消的 task，登記到 _running_tasks 供 /stop 使用。"""
+    # 協作啟用時：把其他頻道近期活動摘要注入 prompt 最前面（只在對話主流程；
+    # compact／語音解析不經過本函式，因此天然不受影響）。
+    if COORD_ENABLED:
+        feed = _coord_registry.format_for_prompt(exclude=channel_id)
+        if feed:
+            prompt = t("coord_prompt_prefix", feed=feed) + prompt
     last_kind = "UNKNOWN"
     last_raw = ""
     for attempt in range(RETRY_MAX_ATTEMPTS):
@@ -827,11 +908,19 @@ def get_state(cid: int) -> dict:
             rec = {"session_id": rec}
         rec = rec or {}
         cwd = Path(rec.get("cwd")) if rec.get("cwd") else DEFAULT_DIR
+        # worktree 模式：若紀錄的 worktree 目錄已被外部移除，視為未啟用並還原到啟用前的目錄
+        wt_rec = rec.get("wt")
+        if wt_rec and isinstance(wt_rec, dict) and not Path(wt_rec.get("path", "")).is_dir():
+            prev = wt_rec.get("prev_cwd")
+            if prev and Path(prev).is_dir():
+                cwd = Path(prev)
+            wt_rec = None
         _sessions[cid] = {
             "session_id": rec.get("session_id"),
             "cwd": cwd if cwd.is_dir() else DEFAULT_DIR,
             "model": rec.get("model") or DEFAULT_MODEL,
             "effort": rec.get("effort"),
+            "wt": wt_rec if isinstance(wt_rec, dict) else None,
             "_cid": cid,
         }
     return _sessions[cid]
@@ -1054,7 +1143,8 @@ async def run_claude(
         # 內含 LaTeX 錢字號、反引號、或無法用系統編碼表示的 Unicode 數學符號時，
         # 會讓 init 的控制訊息損毀，導致 Control request timeout: initialize 卡死 60s。
         # 因此這裡一律「用文字描述規則」，不嵌入這些危險字元本身。
-        system_prompt=t("system_prompt"),
+        # 啟用協作時附加同為純文字的 coord_rule（仍不含危險字元）；未啟用則完全不變。
+        system_prompt=(t("system_prompt") + t("coord_rule")) if COORD_ENABLED else t("system_prompt"),
     )
     if state.get("session_id"):
         options.resume = state["session_id"]
@@ -1314,7 +1404,28 @@ async def _maybe_auto_compact(channel: discord.TextChannel, state: dict) -> None
     except Exception as e:
         await msg.edit(content=t("compact_failed", e=e))
 
+async def _emit_coord(channel, text: str) -> str:
+    """解析回覆中的 [[COORD:]] 廣播：更新登錄表、發到協作頻道，回傳去標記後的文字。"""
+    items, clean = coord_core.parse_broadcasts(text)
+    if not items:
+        return text
+    cid = getattr(channel, "id", 0)
+    name = getattr(channel, "name", None) or str(cid)
+    for it in items:
+        _coord_registry.update(cid, name, it)
+    if COORD_CHANNEL and COORD_CHANNEL != cid:
+        dest = bot.get_channel(COORD_CHANNEL)
+        if dest is not None:
+            for it in items:
+                try:
+                    await dest.send(t("coord_broadcast", name=name, task=it))
+                except Exception:
+                    pass
+    return clean
+
 async def _send_files_and_text(channel, text: str) -> None:
+    if COORD_ENABLED:
+        text = await _emit_coord(channel, text)
     paths = _FILE_MARKER.findall(text)
     clean = _FILE_MARKER.sub("", text).strip()
 
@@ -1801,6 +1912,20 @@ async def on_guild_channel_delete(channel: discord.abc.GuildChannel) -> None:
     """側欄頻道被刪 → 清掉它的 session 記錄與 state（Claude JSONL 留在硬碟，日後可救回）。"""
     if channel.id == _sidebar_entry_id:
         return
+    # 頻道若有開 worktree → 嘗試清掉（不加 --force，髒的會被擋下而保留，不丟工作）
+    wt_rec = None
+    st = _sessions.get(channel.id)
+    if st:
+        wt_rec = st.get("wt")
+    else:
+        rec = _load_sessions_map().get(str(channel.id))
+        if isinstance(rec, dict):
+            wt_rec = rec.get("wt")
+    if isinstance(wt_rec, dict) and wt_rec.get("repo") and wt_rec.get("path"):
+        try:
+            await asyncio.to_thread(wt_core.remove, wt_rec["repo"], wt_rec["path"])
+        except Exception:
+            pass
     _allowed_channels.discard(channel.id)
     _sessions.pop(channel.id, None)
     try:
@@ -1891,6 +2016,10 @@ async def cmd_status(interaction: discord.Interaction):
         t("status_title"),
         t("status_convo", label=label),
         t("status_dir", cwd=state['cwd']),
+    ]
+    if state.get("wt"):
+        lines.append(t("status_worktree", branch=state["wt"]["branch"], base=state["wt"]["base"]))
+    lines += [
         t("status_session", id=sid[:8]) if sid else t("status_session_none"),
         t("status_model", model=state['model'] or t("default_inline"), fb=FALLBACK_MODEL),
         t("status_effort", effort=state['effort'] or t("default_inline")),
@@ -2046,8 +2175,125 @@ async def cmd_cd(interaction: discord.Interaction, path: str):
 @bot.tree.command(name="pwd", description=t("cmd_pwd_desc"))
 async def cmd_pwd(interaction: discord.Interaction):
     if not await check_auth(interaction): return
-    cwd = get_state(interaction.channel_id)["cwd"]
-    await interaction.response.send_message(f"📂 `{cwd}`")
+    state = get_state(interaction.channel_id)
+    cwd = state["cwd"]
+    if state.get("wt"):
+        await interaction.response.send_message(
+            t("pwd_with_wt", cwd=cwd, branch=state["wt"]["branch"]))
+    else:
+        await interaction.response.send_message(f"📂 `{cwd}`")
+
+def _wt_error_text(error: str) -> str:
+    """把 wt_core 回傳的錯誤代碼轉成給使用者的中文/英文訊息。"""
+    mapping = {
+        "not_a_repo": t("wt_err_not_repo"),
+        "no_base_branch": t("wt_err_no_base"),
+        "path_exists": t("wt_err_path_exists"),
+    }
+    return mapping.get(error, t("wt_err_git", err=error[:300]))
+
+@bot.tree.command(name="worktree", description=t("cmd_worktree_desc"))
+@discord.app_commands.choices(action=[
+    discord.app_commands.Choice(name="on", value="on"),
+    discord.app_commands.Choice(name="merge", value="merge"),
+    discord.app_commands.Choice(name="off", value="off"),
+    discord.app_commands.Choice(name="list", value="list"),
+])
+async def cmd_worktree(interaction: discord.Interaction, action: str,
+                       name: Optional[str] = None):
+    """平行協作：on 開、merge 合回主分支並清理、off 移除（皆乾淨才動）、list 列出。"""
+    if not await check_auth(interaction): return
+    await interaction.response.defer()
+    state = get_state(interaction.channel_id)
+    cwd = state["cwd"]
+
+    if action == "list":
+        items = await asyncio.to_thread(wt_core.list_worktrees, cwd)
+        if not items:
+            await interaction.followup.send(t("wt_list_none"))
+            return
+        lines = [t("wt_list_title")]
+        for it in items:
+            br = it.get("branch") or (it.get("head", "")[:8]) or "?"
+            lines.append(t("wt_list_item", branch=br, path=it.get("path", "")))
+        await interaction.followup.send("\n".join(lines))
+        return
+
+    if action == "on":
+        if state.get("wt"):
+            w = state["wt"]
+            await interaction.followup.send(
+                t("wt_already_on", branch=w["branch"], path=w["path"]))
+            return
+        seg = name or getattr(interaction.channel, "name", None) or "session"
+        res = await asyncio.to_thread(wt_core.create, cwd, seg)
+        if not res.ok:
+            await interaction.followup.send(_wt_error_text(res.error))
+            return
+        state["wt"] = {
+            "path": str(res.path),
+            "branch": res.branch,
+            "base": res.base,
+            "repo": str(res.repo),
+            "prev_cwd": str(cwd),   # off 時還原到啟用前的目錄
+        }
+        state["cwd"] = res.path
+        _persist_session(state)
+        await interaction.followup.send(
+            t("wt_on_done", branch=res.branch, base=res.base, path=res.path))
+        return
+
+    if action == "merge":
+        w = state.get("wt")
+        if not w:
+            await interaction.followup.send(t("wt_not_on"))
+            return
+        res = await asyncio.to_thread(
+            wt_core.merge, w["repo"], w["path"], w["branch"], w["base"])
+        if not res.ok:
+            # 所有失敗情況都保持原狀、不刪任何東西（Q3-A 硬安全閘）
+            if res.error == "worktree_dirty":
+                await interaction.followup.send(t("wt_merge_wt_dirty"))
+            elif res.error == "repo_dirty":
+                await interaction.followup.send(
+                    t("wt_merge_repo_dirty", base=w["base"]))
+            elif res.error.startswith("repo_not_on_base"):
+                cur = res.error.split(":", 1)[1] if ":" in res.error else "?"
+                await interaction.followup.send(
+                    t("wt_merge_not_on_base", base=w["base"], cur=cur))
+            elif res.error == "merge_conflict":
+                await interaction.followup.send(t("wt_merge_conflict",
+                    branch=w["branch"], base=w["base"],
+                    files=(res.detail or "?")[:500]))
+            else:
+                await interaction.followup.send(_wt_error_text(res.error))
+            return
+        # 合併成功 → worktree 與分支已清理，還原 cwd、清掉 wt、持久化
+        prev = Path(w.get("prev_cwd") or w["repo"])
+        state["cwd"] = prev if prev.is_dir() else DEFAULT_DIR
+        state.pop("wt", None)
+        _persist_session(state)
+        await interaction.followup.send(
+            t("wt_merge_done", branch=w["branch"], base=w["base"],
+              cwd=state["cwd"]))
+        return
+
+    # action == "off"
+    w = state.get("wt")
+    if not w:
+        await interaction.followup.send(t("wt_not_on"))
+        return
+    res = await asyncio.to_thread(wt_core.remove, w["repo"], w["path"])
+    if not res.ok:
+        # 多半是有未提交變更 → 安全閘擋下，工作保留
+        await interaction.followup.send(t("wt_off_dirty", err=res.error[:300]))
+        return
+    prev = Path(w.get("prev_cwd") or w["repo"])
+    state["cwd"] = prev if prev.is_dir() else DEFAULT_DIR
+    state.pop("wt", None)
+    _persist_session(state)
+    await interaction.followup.send(
+        t("wt_off_done", branch=w["branch"], cwd=state["cwd"]))
 
 @bot.tree.command(name="screenshot", description=t("cmd_screenshot_desc"))
 async def cmd_screenshot(interaction: discord.Interaction):
