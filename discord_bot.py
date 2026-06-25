@@ -1727,6 +1727,29 @@ def _safe_channel_name(title: str) -> str:
     name = " ".join((title or "").split())[:90].strip()
     return name or t("untitled_chat")
 
+WT_PREFIX = "🌿"   # worktree 頻道在側欄的視覺前綴（左側列表一眼分辨平行分支）
+
+def _strip_wt_prefix(name: str) -> str:
+    """去掉頻道名開頭的 🌿 前綴（含其後空白或連字號），沒有就原樣回傳。"""
+    return re.sub(rf"^{WT_PREFIX}[\s\-]*", "", name or "").strip()
+
+def _channel_display_name(base_title: str, wt_on: bool) -> str:
+    """依 worktree 狀態組頻道名：開著加 🌿 前綴，否則就是安全標題本身。"""
+    safe = _safe_channel_name(_strip_wt_prefix(base_title))
+    return f"{WT_PREFIX} {safe}" if wt_on else safe
+
+async def _rename_for_wt(channel: discord.TextChannel, wt_on: bool) -> None:
+    """側欄頻道：依 worktree 狀態加／去 🌿 前綴；改名失敗不影響主流程（純視覺）。"""
+    if not isinstance(channel, discord.TextChannel):
+        return
+    try:
+        cur = getattr(channel, "name", "") or ""
+        new = _channel_display_name(cur, wt_on)
+        if new != cur:
+            await channel.edit(name=new)
+    except Exception as e:
+        print(f"[WT] 側欄前綴更新失敗：{e}", flush=True)
+
 async def _open_sidebar_channel(guild: discord.Guild, category: discord.CategoryChannel,
                                 session_id: Optional[str] = None, title: Optional[str] = None,
                                 cwd: Optional[str] = None) -> Optional[discord.TextChannel]:
@@ -1824,7 +1847,7 @@ async def _autoname_channel(channel: discord.TextChannel, state: dict) -> None:
             return
         _save_title(state["session_id"], title)
         state["_session_label"] = title
-        await channel.edit(name=_safe_channel_name(title))
+        await channel.edit(name=_channel_display_name(title, bool(state.get("wt"))))
         await _update_presence(channel.id, title)
     except Exception as e:
         print(f"[SIDEBAR] 自動改名失敗：{e}", flush=True)
@@ -2241,6 +2264,8 @@ async def cmd_worktree(interaction: discord.Interaction, action: str,
         _persist_session(state)
         await interaction.followup.send(
             t("wt_on_done", branch=res.branch, base=res.base, path=res.path))
+        if state.get("_sidebar"):
+            await _rename_for_wt(interaction.channel, True)
         return
 
     if action == "merge":
@@ -2276,6 +2301,8 @@ async def cmd_worktree(interaction: discord.Interaction, action: str,
         await interaction.followup.send(
             t("wt_merge_done", branch=w["branch"], base=w["base"],
               cwd=state["cwd"]))
+        if state.get("_sidebar"):
+            await _rename_for_wt(interaction.channel, False)
         return
 
     # action == "off"
@@ -2294,6 +2321,8 @@ async def cmd_worktree(interaction: discord.Interaction, action: str,
     _persist_session(state)
     await interaction.followup.send(
         t("wt_off_done", branch=w["branch"], cwd=state["cwd"]))
+    if state.get("_sidebar"):
+        await _rename_for_wt(interaction.channel, False)
 
 @bot.tree.command(name="screenshot", description=t("cmd_screenshot_desc"))
 async def cmd_screenshot(interaction: discord.Interaction):
