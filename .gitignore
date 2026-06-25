@@ -8,6 +8,7 @@ allowed_channels.json
 schedules.json
 session_titles.json
 last_version.json
+account_plan.json
 
 # Logs
 *.log

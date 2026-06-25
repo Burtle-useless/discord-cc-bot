@@ -88,11 +88,13 @@ Then open `.env` and fill in `DISCORD_TOKEN`, `ALLOWED_CHANNEL`, and
 `ALLOWED_USER`. The rest are optional (see comments in the file).
 
 > **Model & context:** by default the bot uses standard 200K context
-> (`claude-sonnet-4-6`), which works on every plan with no usage credits. If you
-> ever see *"Usage credits required for 1M context"*, it means a 1M-context model
-> was selected without credits — the default avoids that. To opt into the 1M
-> window (only if your plan has the credits), set `DEFAULT_MODEL` to a 1M alias
-> such as `claude-sonnet-4-6[1m]` in `.env`.
+> (`claude-sonnet-4-6`), which works on every plan with no usage credits. Tell
+> the bot your plan with `/plan` and it applies Anthropic's official rule: on
+> **Max / Team / Enterprise**, Opus automatically gets the 1M context window with
+> no extra setup. For every other case (Sonnet on any plan, or Opus on Pro), opt
+> into 1M by adding the `[1m]` alias to the model (e.g. `claude-sonnet-4-6[1m]`),
+> which requires 1M usage credits. If you ever see *"Usage credits required for
+> 1M context"*, a 1M model was selected without the entitlement.
 
 ---
 
@@ -136,6 +138,7 @@ Now type a message in your bound channel — the bot should respond.
 | `/status` | Show current status |
 | `/model` | Pick the Claude model |
 | `/effort` | Pick the thinking effort level |
+| `/plan` | Set your subscription plan (applies the official 1M-context rule) |
 | `/cd`, `/pwd` | Change / show the working directory |
 | `/screenshot` | Capture the PC screen |
 | `/usage` | Show plan usage (5h / 7d) |

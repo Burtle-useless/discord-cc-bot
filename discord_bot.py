@@ -211,6 +211,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "effort_low": "low (fast)",
         "effort_max": "max (strongest)",
         "effort_set": "✅ Effort set to `{effort}`",
+        "cmd_plan_desc": "Set your Claude subscription plan (controls the 1M context window)",
+        "plan_unknown": "Not sure / clear setting",
+        "plan_set_auto": "✅ Plan set to `{plan}`. Opus now auto-uses the 1M context window; other models stay at 200K (add the `[1m]` alias when you need 1M).",
+        "plan_set_std": "✅ Plan set to `{plan}`. Context stays at the standard 200K. To use 1M, add the `[1m]` alias to the model — on this plan that needs 1M usage credits.",
         "cmd_cd_desc": "Change the working directory",
         "cd_not_found": "❌ Directory doesn't exist: `{path}`",
         "cd_done": "📂 Switched to `{p}`",
@@ -300,6 +304,7 @@ _STRINGS: dict[str, dict[str, str]] = {
             "`/status` — current status\n"
             "`/model` — pick the model\n"
             "`/effort` — pick the thinking effort\n"
+            "`/plan` — set your subscription plan (controls the 1M context window)\n"
             "`/cd <path>` — change the working directory\n"
             "`/pwd` — current directory\n"
             "`/screenshot` — capture the PC screen\n"
@@ -480,6 +485,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "effort_low": "low（快速）",
         "effort_max": "max（最強）",
         "effort_set": "✅ 思考程度設為 `{effort}`",
+        "cmd_plan_desc": "設定你的 Claude 訂閱方案（決定 1M context 視窗）",
+        "plan_unknown": "不確定／清除設定",
+        "plan_set_auto": "✅ 方案設為 `{plan}`。Opus 現在會自動使用 1M context；其他模型維持 200K（需要時在模型加 `[1m]` 後綴）。",
+        "plan_set_std": "✅ 方案設為 `{plan}`。Context 維持標準 200K。要用 1M 請在模型加 `[1m]` 後綴——此方案需要 1M usage credits。",
         "cmd_cd_desc": "切換工作目錄",
         "cd_not_found": "❌ 目錄不存在：`{path}`",
         "cd_done": "📂 切換到 `{p}`",
@@ -568,6 +577,7 @@ _STRINGS: dict[str, dict[str, str]] = {
             "`/status` — 目前狀態\n"
             "`/model` — 選擇模型\n"
             "`/effort` — 選擇思考程度\n"
+            "`/plan` — 設定訂閱方案（決定 1M context 視窗）\n"
             "`/cd <路徑>` — 切換工作目錄\n"
             "`/pwd` — 目前目錄\n"
             "`/screenshot` — 截取電腦目前畫面\n"
@@ -646,9 +656,27 @@ DEFAULT_MODEL   = os.environ.get("DEFAULT_MODEL") or "claude-sonnet-4-6"
 MAX_BUFFER_SIZE = 64 * 1024 * 1024         # stream-json 解析 buffer 上限（64MB）
 RETRY_MAX_ATTEMPTS = 4                       # 529/429 退避重試次數上限
 RETRY_BASE_DELAY   = 1.0                     # 退避基礎秒數
-# context 接近上限的自動壓縮門檻：依預設模型自動判斷——1M 模型→850k、標準 200K→170k
-CONTEXT_LIMIT_TOKENS = 1_000_000 if "[1m]" in DEFAULT_MODEL else 200_000   # context 視窗上限（1M 模型→1M，標準→200K）
-CONTEXT_WARN_TOKENS = int(CONTEXT_LIMIT_TOKENS * 0.85)                     # 接近上限的自動壓縮門檻＝上限的 85%
+# ── context 視窗上限：依「模型 + 帳號方案」套用 Anthropic 官方規則 ───────────
+# 官方規則（Claude Code: Model configuration）：
+#   1) 模型別名含 [1m]（例 claude-sonnet-4-6[1m]）→ 強制 1M；帳號若無資格 CC 會自己擋。
+#   2) Opus 在 Max／Team／Enterprise 方案 → 訂閱內建、自動升 1M，免額外設定。
+#   3) 其餘（Sonnet 任何方案、Opus 在 Pro、不支援 1M 的舊模型）→ 標準 200K。
+#      這些情況要用 1M 需另購 usage credits，做法就是加 [1m] 後綴（落回規則 1）。
+# 自動壓縮門檻＝上限的 85%（1M→850k、200K→170k）；實際數值在各呼叫點用 _ctx_limit() 算。
+_AUTO_1M_PLANS = frozenset({"max", "team", "enterprise"})   # Opus 在這些方案自動 1M
+
+def _is_opus(model: str) -> bool:
+    """是否為 Opus 系列（本 bot 提供的 Opus 皆為支援 1M 的 4.6+）。"""
+    return "opus" in (model or "").lower()
+
+def context_limit_for(model: str, plan: str) -> int:
+    """回傳該模型在該方案下的 context 視窗上限（tokens），套用上述官方規則。"""
+    m = model or DEFAULT_MODEL or ""
+    if "[1m]" in m:                                  # 規則 1：明確要 1M
+        return 1_000_000
+    if _is_opus(m) and plan in _AUTO_1M_PLANS:       # 規則 2：Opus 在 Max/Team/Enterprise 自動 1M
+        return 1_000_000
+    return 200_000                                   # 規則 3：其餘標準 200K
 NOTIFY_AFTER_SEC = 60                        # 任務耗時超過此秒數，完成時 @使用者推播
 INACTIVITY_TIMEOUT = 600                      # CC 連續無任何輸出超過此秒數才視為卡死（不限總時長，長工作流不會被誤殺）
 
@@ -702,6 +730,33 @@ def _save_allowed_users(users: set[int]) -> None:
         pass
 
 _allowed_users: set[int] = _load_allowed_users()
+
+# ── 帳號方案持久化（決定 Opus 是否自動 1M context）──────────────────────────
+# 方案是「整個帳號層級」設定（同一個 bot＝同一組 Claude 登入），故全域存一份、不分
+# session。用 /plan 指令設定；也可用環境變數 CLAUDE_PLAN 當預設值。
+_PLAN_FILE = _BOT_DIR / "account_plan.json"
+
+def _load_plan() -> str:
+    """讀帳號方案：檔案優先，其次環境變數，最後 'unknown'（行為等同舊版：只認 [1m]）。"""
+    try:
+        v = json.loads(_PLAN_FILE.read_text()).get("plan")
+        if v:
+            return v
+    except Exception:
+        pass
+    return os.environ.get("CLAUDE_PLAN") or "unknown"
+
+def _save_plan(plan: str) -> None:
+    try:
+        _PLAN_FILE.write_text(json.dumps({"plan": plan}))
+    except Exception:
+        pass
+
+_account_plan: str = _load_plan()
+
+def _ctx_limit(state: dict) -> int:
+    """該 session 目前的 context 上限：依其模型（未設則用 DEFAULT_MODEL）＋帳號方案。"""
+    return context_limit_for(state.get("model") or DEFAULT_MODEL, _account_plan)
 
 # ── 允許頻道持久化（可加開多個頻道並行跑工作）──────────────────────────────
 _CHANNELS_FILE = _BOT_DIR / "allowed_channels.json"
@@ -1387,7 +1442,7 @@ async def _convert_pptx(src: Path) -> Optional[Path]:
 
 async def _maybe_auto_compact(channel: discord.TextChannel, state: dict) -> None:
     """context 達到門檻時自動執行 /compact，避免 CONTEXT_FULL。"""
-    if state.get("ctx_tokens", 0) < CONTEXT_WARN_TOKENS:
+    if state.get("ctx_tokens", 0) < int(_ctx_limit(state) * 0.85):
         return
     msg = await channel.send(t("compacting"))
     try:
@@ -2044,7 +2099,8 @@ async def cmd_status(interaction: discord.Interaction):
     sid = state["session_id"]
     label = await asyncio.to_thread(_session_label, sid)
     ctx = state.get("ctx_tokens", 0)
-    ctx_bar = _bar(ctx / CONTEXT_LIMIT_TOKENS * 100)
+    ctx_limit = _ctx_limit(state)
+    ctx_bar = _bar(ctx / ctx_limit * 100)
     lines = [
         t("status_title"),
         t("status_convo", label=label),
@@ -2056,7 +2112,7 @@ async def cmd_status(interaction: discord.Interaction):
         t("status_session", id=sid[:8]) if sid else t("status_session_none"),
         t("status_model", model=state['model'] or t("default_inline"), fb=FALLBACK_MODEL),
         t("status_effort", effort=state['effort'] or t("default_inline")),
-        t("status_context", bar=ctx_bar, ctx=f"{ctx:,}", limit=f"{CONTEXT_LIMIT_TOKENS:,}"),
+        t("status_context", bar=ctx_bar, ctx=f"{ctx:,}", limit=f"{ctx_limit:,}"),
     ]
     await interaction.response.send_message("\n".join(lines))
 
@@ -2192,6 +2248,24 @@ async def cmd_effort(interaction: discord.Interaction, effort: str):
     st["effort"] = None if effort == "default" else effort
     _persist_session(st)   # 立刻存檔，重啟後仍記得
     await interaction.response.send_message(t("effort_set", effort=effort))
+
+@bot.tree.command(name="plan", description=t("cmd_plan_desc"))
+@discord.app_commands.choices(plan=[
+    discord.app_commands.Choice(name="Pro (~$20/mo)",          value="pro"),
+    discord.app_commands.Choice(name="Max (~$100 or $200/mo)", value="max"),
+    discord.app_commands.Choice(name="Team / Enterprise",      value="enterprise"),
+    discord.app_commands.Choice(name="API / pay-as-you-go",    value="api"),
+    discord.app_commands.Choice(name=t("plan_unknown"),        value="unknown"),
+])
+async def cmd_plan(interaction: discord.Interaction, plan: str):
+    # 方案是帳號全域設定（影響所有頻道），限主帳號設定
+    if not await check_auth(interaction, owner_only=True): return
+    global _account_plan
+    _account_plan = plan
+    _save_plan(plan)   # 立刻存檔，重啟後仍記得
+    # 依官方規則回報：這個方案下 Opus 會不會「自動」拿到 1M
+    msg = t("plan_set_auto", plan=plan) if plan in _AUTO_1M_PLANS else t("plan_set_std", plan=plan)
+    await interaction.response.send_message(msg)
 
 @bot.tree.command(name="cd", description=t("cmd_cd_desc"))
 async def cmd_cd(interaction: discord.Interaction, path: str):
