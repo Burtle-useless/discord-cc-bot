@@ -191,12 +191,15 @@ exact steps we tested. Run them **inside your venv**:
 
 3. **GPU (recommended).** A plain install pulls the **CPU** build of PyTorch, so
    XTTS runs on CPU (tens of seconds per reply). For an NVIDIA GPU, install a
-   CUDA build of torch that matches your driver (check `nvidia-smi`), e.g.:
+   **CUDA 12.x** build of torch, e.g.:
    ```
-   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128
+   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu126
    ```
-   Pick the `cuXXX` matching your driver's CUDA version. On GPU, synthesis is
-   ~1–3 s per reply.
+   ⚠️ Use a **cu12x** build (cu126 / cu128) — **not** cu13x, even if your driver
+   supports CUDA 13. Voice *input* (faster-whisper / ctranslate2) loads CUDA-12
+   cuDNN, and a cu13 torch build clashes with it in the same process
+   (`CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH`), which makes /drive voice replies
+   silently fall back to text. On GPU, synthesis is ~1–3 s per reply.
 
 4. **Accept the model license.** Set `COQUI_TOS_AGREED=1` in your `.env`.
    Otherwise the first `/drive on` hangs forever waiting for an interactive
