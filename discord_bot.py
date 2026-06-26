@@ -739,11 +739,16 @@ NOTIFY_AFTER_SEC = 60                        # 任務耗時超過此秒數，完
 INACTIVITY_TIMEOUT = 600                      # CC 連續無任何輸出超過此秒數才視為卡死（不限總時長，長工作流不會被誤殺）
 
 # ── 版本與更新內容 ──────────────────────────────────────────────────────
-BOT_VERSION = "1.17.2"
-CHANGE_TYPE = "fix"
+BOT_VERSION = "1.18.0"
+CHANGE_TYPE = "feat"
 CHANGELOG = """\
-🔧 **/sessions and /search are now ephemeral (no leftover messages)**
-• The conversation list and "restored" notices are visible only to you; the entry channel no longer keeps clutter
+✨ **v1.18.0 — persistent sessions, semantic search, drive mode & more**
+• Each channel now keeps one long-lived Claude session (same process & context) — more coherent replies, no stray session-fragment files
+• /search finds conversations by meaning, not just keywords (needs fastembed; falls back to keyword search without it)
+• /handoff — hand your current progress off to another machine seamlessly
+• /drive — drive mode: voice in, voice out (local Whisper + XTTS-v2)
+• /plan — auto-applies the correct context-limit rule for your subscription plan
+• git worktree parallel work: run several branch channels for one project at once (marked 🌿 in the sidebar)
 """
 
 _CHANGE_TYPE_LABEL = {
