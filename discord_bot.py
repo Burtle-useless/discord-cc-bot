@@ -171,7 +171,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "entry_message": (
             "**🗂️ CC Conversations**\n"
             "• Tap the button below → start a new chat (creates a channel above)\n"
-            "• To resume an old chat → use `/sessions` (all) or `/search <keyword>` here; picking one restores it into a new channel"
+            "• To resume an old chat → use `/sessions` (all) or `/search <query>` (by meaning) here; picking one restores it into a new channel"
         ),
         # 權限
         "no_permission": "❌ No permission.",
@@ -214,7 +214,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "untitled": "(untitled)",
         "sessions_header_all": "🖥️ **All conversations on this PC** (incl. desktop app)",
         "sessions_header_mine": "📋 **Past conversations** (only this bot's)",
-        "cmd_search_desc": "Search past conversation content (by keyword)",
+        "cmd_search_desc": "Search past conversations by meaning (semantic search)",
         "search_none": "🔍 No conversation mentions “{kw}”.",
         "search_header": "🔍 **Results for “{kw}”** ({n})",
         "cmd_model_desc": "Pick the Claude model",
@@ -327,7 +327,7 @@ _STRINGS: dict[str, dict[str, str]] = {
             "`/stop` — stop the current task immediately\n"
             "`/continue` — resume the previous session\n"
             "`/sessions` — switch to a past conversation\n"
-            "`/search <keyword>` — search past conversation content\n"
+            "`/search <query>` — find past conversations by meaning\n"
             "`/handoff` — generate a handoff brief to continue on another machine\n"
             "`/status` — current status\n"
             "`/model` — pick the model\n"
@@ -477,7 +477,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "entry_message": (
             "**🗂️ CC 對話**\n"
             "• 點下面按鈕 → 開一個新對話（在上方建新頻道）\n"
-            "• 想接續舊對話 → 在這裡打 `/sessions`（全部）或 `/search 關鍵字`，選一個會救回成新頻道"
+            "• 想接續舊對話 → 在這裡打 `/sessions`（全部）或 `/search 查詢`（用大概意思找），選一個會救回成新頻道"
         ),
         "no_permission": "❌ 無權限。",
         "owner_only": "❌ 只有主帳號能執行此指令。",
@@ -517,7 +517,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "untitled": "（無標題）",
         "sessions_header_all": "🖥️ **電腦上所有對話**（含桌面版）",
         "sessions_header_mine": "📋 **歷史對話**（只列本 bot 的對話）",
-        "cmd_search_desc": "搜尋歷史對話內容（依關鍵字）",
+        "cmd_search_desc": "依語意搜尋歷史對話（用大概意思找，免精準關鍵字）",
         "search_none": "🔍 找不到提到「{kw}」的對話。",
         "search_header": "🔍 **搜尋「{kw}」的結果**（{n} 筆）",
         "cmd_model_desc": "選擇 Claude 模型",
@@ -629,7 +629,7 @@ _STRINGS: dict[str, dict[str, str]] = {
             "`/stop` — 立即停止目前工作\n"
             "`/continue` — 繼續上次 session\n"
             "`/sessions` — 切換歷史對話\n"
-            "`/search <關鍵字>` — 搜尋歷史對話內容\n"
+            "`/search <查詢>` — 依語意搜尋歷史對話\n"
             "`/handoff` — 生成交接稿，換另一台電腦接手\n"
             "`/status` — 目前狀態\n"
             "`/model` — 選擇模型\n"
@@ -2595,15 +2595,15 @@ def _search_sessions(keyword: str, limit: int = 15) -> list[dict]:
     return sorted(hits, key=lambda e: e["mtime"], reverse=True)[:limit]
 
 @bot.tree.command(name="search", description=t("cmd_search_desc"))
-async def cmd_search(interaction: discord.Interaction, keyword: str):
+async def cmd_search(interaction: discord.Interaction, query: str):
     if not await check_auth(interaction): return
     await interaction.response.defer(ephemeral=True)   # ephemeral：零殘留
     # 優先語意搜尋（依描述內容找，需 fastembed）；無 fastembed 時自動退回字面關鍵字搜尋
-    entries = await asyncio.to_thread(_semantic_search, keyword)
+    entries = await asyncio.to_thread(_semantic_search, query)
     if entries is None:
-        entries = await asyncio.to_thread(_search_sessions, keyword)
+        entries = await asyncio.to_thread(_search_sessions, query)
     if not entries:
-        await interaction.followup.send(t("search_none", kw=keyword), ephemeral=True)
+        await interaction.followup.send(t("search_none", kw=query), ephemeral=True)
         return
     bot._session_pick_cache = entries
 
@@ -2623,7 +2623,7 @@ async def cmd_search(interaction: discord.Interaction, keyword: str):
 
     view = discord.ui.View()
     view.add_item(SearchSelect())
-    await interaction.followup.send(t("search_header", kw=keyword, n=len(entries)), view=view, ephemeral=True)
+    await interaction.followup.send(t("search_header", kw=query, n=len(entries)), view=view, ephemeral=True)
 
 @bot.tree.command(name="model", description=t("cmd_model_desc"))
 @discord.app_commands.choices(model=[
