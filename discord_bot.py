@@ -978,6 +978,13 @@ _sessions: dict[int, dict] = {}
 _processing: dict[int, bool] = {}
 _running_tasks: dict[int, "asyncio.Task"] = {}
 
+# 長駐 ClaudeSDKClient 池（A'）：每頻道維持一個活進程，活躍期間不關＝桌面同邏輯、
+# 同進程同 session、不 fork、不留碎片；閒置逾時才回收釋放記憶體，下次以 resume 接回。
+_clients: dict[int, "ClaudeSDKClient"] = {}
+_client_used: dict[int, float] = {}        # 每頻道 client 最後使用時間（閒置回收判斷用）
+_client_sigs: dict[int, tuple] = {}        # 每頻道 client 的設定指紋（變了就重建）
+CLIENT_IDLE_TIMEOUT = 900                  # 閒置逾時（秒）：超過則回收該頻道 client
+
 
 class _StoppedByUser(Exception):
     """使用者透過 /stop 主動中止工作。"""
@@ -1061,6 +1068,73 @@ def get_state(cid: int) -> dict:
             "_cid": cid,
         }
     return _sessions[cid]
+
+# ── 長駐 client（A'）輔助函式 ───────────────────────────────────────────
+def _build_options(state: dict) -> ClaudeAgentOptions:
+    """依頻道狀態組出 ClaudeAgentOptions（建立長駐 client 時用一次）。"""
+    # cwd 防護：切換歷史 session 可能帶入不存在的目錄（WinError 267），退回預設目錄
+    if not Path(state["cwd"]).is_dir():
+        state["cwd"] = DEFAULT_DIR
+    options = ClaudeAgentOptions(
+        cwd=str(state["cwd"]),
+        cli_path=CLAUDE_CLI,
+        model=state.get("model"),
+        effort=state.get("effort"),
+        permission_mode="bypassPermissions",
+        fallback_model=FALLBACK_MODEL,
+        max_buffer_size=MAX_BUFFER_SIZE,
+        # 此 system_prompt 會透過管線傳給 CC 子進程。實測在 Windows 上，內含 LaTeX
+        # 錢字號、反引號、或無法用系統編碼表示的 Unicode 數學符號時，會讓 init 的控制
+        # 訊息損毀，導致 initialize 卡死。故一律「用文字描述規則」，不嵌入危險字元本身。
+        # 啟用協作時附加 coord_rule、開車模式附加 drive_rule（皆不含危險字元）。
+        system_prompt=t("system_prompt")
+        + (t("coord_rule") if COORD_ENABLED else "")
+        + (t("drive_rule") if _drive_mode else ""),
+    )
+    # 開啟逐字串流，讓生成中的回應能即時顯示在「思考中」訊息，提供存活訊號
+    options.include_partial_messages = True
+    return options
+
+
+async def _drop_client(cid: int) -> None:
+    """關閉並移除某頻道的長駐 client（出錯、/new、改設定、頻道刪除時用，永不拋例外）。"""
+    c = _clients.pop(cid, None)
+    _client_used.pop(cid, None)
+    _client_sigs.pop(cid, None)
+    if c is not None:
+        try:
+            await c.disconnect()
+        except Exception:
+            pass
+
+
+def _client_sig(state: dict) -> tuple:
+    """長駐 client 的設定指紋（不含 session_id：sid 會在正常對話中由 client 自己產出）。
+    cwd／model／effort／開車模式／協作模式任一改變，即代表要用新設定重建 client。"""
+    return (str(state.get("cwd")), state.get("model"), state.get("effort"),
+            _drive_mode, COORD_ENABLED)
+
+
+async def _acquire_client(state: dict) -> "ClaudeSDKClient":
+    """取得該頻道的長駐 client；無、或設定指紋已變，則（丟棄後）新建並連線。
+    首次連線才帶 resume 接回舊 session；之後同一 client 多輪都在同進程同 session。"""
+    cid = state["_cid"]
+    c = _clients.get(cid)
+    if c is not None and _client_sigs.get(cid) == _client_sig(state):
+        _client_used[cid] = time.time()
+        return c
+    if c is not None:                 # 設定已變 → 丟棄舊 client，用新設定重建
+        await _drop_client(cid)
+    options = _build_options(state)
+    if state.get("session_id"):
+        options.resume = state["session_id"]   # 僅首次連線需要接回
+    c = ClaudeSDKClient(options)
+    await c.connect()
+    _clients[cid] = c
+    _client_sigs[cid] = _client_sig(state)
+    _client_used[cid] = time.time()
+    return c
+
 
 def _resolve_project_dir(project_path: str) -> tuple[Path, bool]:
     """回傳 (可用目錄, 是否為原路徑)。原路徑不存在時退回預設目錄。"""
@@ -1284,32 +1358,6 @@ async def run_claude(
     progress_msg: Optional[discord.Message] = None,
 ) -> tuple[str, Optional[str], Optional[dict]]:
     """回傳 (content, new_session_id, ask_question_data)"""
-    # cwd 防護：切換歷史 session 可能帶入不存在的目錄（WinError 267），退回預設目錄
-    if not Path(state["cwd"]).is_dir():
-        state["cwd"] = DEFAULT_DIR
-    options = ClaudeAgentOptions(
-        cwd=str(state["cwd"]),
-        cli_path=CLAUDE_CLI,
-        model=state.get("model"),
-        effort=state.get("effort"),
-        permission_mode="bypassPermissions",
-        fallback_model=FALLBACK_MODEL,
-        max_buffer_size=MAX_BUFFER_SIZE,
-        # 注意：此 system_prompt 會透過管線傳給 CC 子進程。實測在 Windows 上，
-        # 內含 LaTeX 錢字號、反引號、或無法用系統編碼表示的 Unicode 數學符號時，
-        # 會讓 init 的控制訊息損毀，導致 Control request timeout: initialize 卡死 60s。
-        # 因此這裡一律「用文字描述規則」，不嵌入這些危險字元本身。
-        # 啟用協作時附加純文字 coord_rule、開車模式附加 drive_rule（皆不含危險字元）；
-        # 兩者都未啟用則與原本完全相同。
-        system_prompt=t("system_prompt")
-        + (t("coord_rule") if COORD_ENABLED else "")
-        + (t("drive_rule") if _drive_mode else ""),
-    )
-    if state.get("session_id"):
-        options.resume = state["session_id"]
-    # 開啟逐字串流，讓生成中的回應能即時顯示在「思考中」訊息，提供存活訊號
-    options.include_partial_messages = True
-
     tool_log: list[str] = []
     tool_count: int = 0
     start = time.time()
@@ -1367,39 +1415,42 @@ async def run_claude(
     async def _run_client() -> None:
         nonlocal live_text
         try:
-            async with ClaudeSDKClient(options) as client:
-                await client.query(prompt)
-                async for raw_data in client._query.receive_messages():
-                    last_activity[0] = time.time()  # 有任何訊息=還活著，重置閒置計時
-                    try:
-                        message = parse_message(raw_data)
-                    except MessageParseError:
-                        continue
-                    # 逐字串流：累積生成中的回應文字供動畫顯示
-                    if isinstance(message, StreamEvent):
-                        ev = message.event or {}
-                        if ev.get("type") == "content_block_delta":
-                            delta = ev.get("delta", {})
-                            if delta.get("type") == "text_delta":
-                                live_text += delta.get("text", "")
-                        continue
-                    messages.append(message)
-                    if isinstance(message, ResultMessage):
-                        break
-                    if isinstance(message, AssistantMessage):
-                        content = getattr(message, "content", [])
-                        tc_list, text_parts = [], []
-                        if isinstance(content, list):
-                            for block in content:
-                                if isinstance(block, ToolUseBlock):
-                                    tc_list.append({"name": block.name, "input": getattr(block,"input",{})})
-                                elif hasattr(block, "text"):
-                                    text_parts.append(block.text)
-                        class _U:
-                            def __init__(self,**kw): self.__dict__.update(kw)
-                        if tc_list:    await on_stream(_U(type="tool",      tool_calls=tc_list,  content=None))
-                        if text_parts: await on_stream(_U(type="assistant", content="\n".join(text_parts), tool_calls=None))
+            client = await _acquire_client(state)   # 長駐：取池中 client，無則新建連線
+            await client.query(prompt)
+            async for raw_data in client._query.receive_messages():
+                last_activity[0] = time.time()  # 有任何訊息=還活著，重置閒置計時
+                try:
+                    message = parse_message(raw_data)
+                except MessageParseError:
+                    continue
+                # 逐字串流：累積生成中的回應文字供動畫顯示
+                if isinstance(message, StreamEvent):
+                    ev = message.event or {}
+                    if ev.get("type") == "content_block_delta":
+                        delta = ev.get("delta", {})
+                        if delta.get("type") == "text_delta":
+                            live_text += delta.get("text", "")
+                    continue
+                messages.append(message)
+                if isinstance(message, ResultMessage):
+                    _client_used[state["_cid"]] = time.time()  # 標記活躍；client 留池不關
+                    break
+                if isinstance(message, AssistantMessage):
+                    content = getattr(message, "content", [])
+                    tc_list, text_parts = [], []
+                    if isinstance(content, list):
+                        for block in content:
+                            if isinstance(block, ToolUseBlock):
+                                tc_list.append({"name": block.name, "input": getattr(block,"input",{})})
+                            elif hasattr(block, "text"):
+                                text_parts.append(block.text)
+                    class _U:
+                        def __init__(self,**kw): self.__dict__.update(kw)
+                    if tc_list:    await on_stream(_U(type="tool",      tool_calls=tc_list,  content=None))
+                    if text_parts: await on_stream(_U(type="assistant", content="\n".join(text_parts), tool_calls=None))
         except Exception:
+            # 長駐 client 可能已損壞（連線斷／進程死）→ 丟棄，下次重建並 resume 接回
+            await _drop_client(state["_cid"])
             raise
 
     anim_task = asyncio.create_task(_animate()) if progress_msg else None
@@ -1417,6 +1468,11 @@ async def run_claude(
             client_task.cancel()
             try:
                 await client_task
+            except BaseException:
+                pass
+            # 被取消＝逾時或 /stop 中斷：client 卡在半途，丟棄以免下次接到半截回應
+            try:
+                await _drop_client(state["_cid"])
             except BaseException:
                 pass
         if anim_task:
@@ -1728,6 +1784,7 @@ async def _handle_cc_error(prog: discord.Message, err: "CCError", state: dict) -
         state["ctx_tokens"] = 0
         state["ctx_warned"] = False
         _persist_session(state)
+        await _drop_client(state.get("_cid"))   # session 已失效，關掉長駐 client（A'）
         msg += t("session_auto_cleared")
     if err.kind == "OVERLOADED":
         inc = await asyncio.to_thread(is_incident_active)
@@ -1901,6 +1958,18 @@ def _countdown(ts: str) -> str:
         return ts
 
 # ── 排程背景循環 ───────────────────────────────────────────────────────
+async def _client_reaper() -> None:
+    """背景迴圈：定期回收閒置逾時的長駐 client，釋放記憶體；下次訊息再以 resume 接回。"""
+    while True:
+        await asyncio.sleep(60)
+        now = time.time()
+        for cid in list(_clients):
+            if _processing.get(cid):          # 正在處理中的不回收
+                continue
+            if now - _client_used.get(cid, 0) > CLIENT_IDLE_TIMEOUT:
+                await _drop_client(cid)
+
+
 async def _schedule_loop() -> None:
     """每 30 秒檢查到期排程並執行。"""
     await bot.wait_until_ready()
@@ -2045,6 +2114,7 @@ async def _restore_session_to_channel(inter: discord.Interaction, entry: dict) -
     state["cwd"] = cwd
     state["_session_label"] = title
     _persist_session(state)
+    await _drop_client(inter.channel_id)   # 換到別段歷史對話，舊 client 須丟棄重接（A'）
     await _update_presence(inter.channel_id, title)
     note = "" if ok else t("folder_missing", cwd=cwd)
     await inter.response.edit_message(
@@ -2161,6 +2231,7 @@ async def on_ready():
     await bot.tree.sync()
     print(t("ready_log", user=bot.user), flush=True)
     asyncio.create_task(_schedule_loop())
+    asyncio.create_task(_client_reaper())   # 長駐 client 閒置回收（A'）
     # 開車模式：上次關機時若為開啟，重啟自動恢復載入兩個模型（開車中崩潰可自癒）；
     # 在家（預設 off）則完全不載入語音模型，不吃 GPU/VRAM。
     if _drive_mode:
@@ -2215,6 +2286,7 @@ async def on_guild_channel_delete(channel: discord.abc.GuildChannel) -> None:
             pass
     _allowed_channels.discard(channel.id)
     _sessions.pop(channel.id, None)
+    await _drop_client(channel.id)   # 關閉並移除該頻道的長駐 client（A'）
     try:
         data = _load_sessions_map()
         if str(channel.id) in data:
@@ -2248,6 +2320,7 @@ async def cmd_new(interaction: discord.Interaction):
     st["ctx_warned"] = False
     st["_session_label"] = t("new_chat")
     _persist_session(st)
+    await _drop_client(interaction.channel_id)   # 開新對話，丟棄舊 client 從頭起一個（A'）
     await _update_presence(interaction.channel_id, t("new_chat"))
     await interaction.response.send_message(t("new_done"))
 
@@ -2835,7 +2908,11 @@ async def cmd_schedule(interaction: discord.Interaction, task: str):
     if not await check_auth(interaction): return
     await interaction.response.defer()
     parse_prompt = t("schedule_parse_prompt", task=task)
-    tmp_state: dict = {"session_id": None, "cwd": DEFAULT_DIR, "model": "claude-haiku-4-5-20251001", "effort": None}
+    # 一次性解析：用 interaction.id 當合成頻道 id（不會與任何 channel_id 撞號），
+    # 讓它自建臨時 client、不碰頻道的長駐 client；解析完在 finally 丟棄（A'）
+    tmp_state: dict = {"session_id": None, "cwd": DEFAULT_DIR,
+                       "model": "claude-haiku-4-5-20251001", "effort": None,
+                       "_cid": interaction.id}
     try:
         result, _, _ = await run_claude(parse_prompt, tmp_state)
         json_match = re.search(r'\{.*\}', result, re.DOTALL)
@@ -2864,6 +2941,8 @@ async def cmd_schedule(interaction: discord.Interaction, task: str):
         await interaction.followup.send(embed=embed)
     except Exception as e:
         await interaction.followup.send(t("schedule_create_failed", e=e))
+    finally:
+        await _drop_client(interaction.id)   # 關閉一次性解析用的臨時 client（A'）
 
 @bot.tree.command(name="schedules", description=t("cmd_schedules_desc"))
 async def cmd_schedules(interaction: discord.Interaction):
