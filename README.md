@@ -164,6 +164,46 @@ Some features need extra packages (already listed in `requirements.txt`):
 
 If you don't want a feature, you can skip its dependency.
 
+### Drive mode (voice reply, XTTS-v2)
+
+> ⚠️ The XTTS-v2 model is under the **Coqui Public Model License (CPML)** —
+> **non-commercial use only**. `/drive` is off by default; skip this whole
+> section unless you want voice *replies* (voice *input* needs only
+> `faster-whisper`, above).
+
+A plain `pip install coqui-tts` is **not enough** on its own — these are the
+exact steps we tested. Run them **inside your venv**:
+
+1. Python packages (note the `transformers` pin — coqui-tts breaks on
+   `transformers` 5.x, which removed a symbol it imports):
+   ```
+   pip install "coqui-tts>=0.24.1" "transformers>=4.57,<5" torchcodec pypinyin
+   ```
+   - `torchcodec` — PyTorch ≥ 2.9 uses it for audio I/O.
+   - `pypinyin` — required for Chinese (`zh`) synthesis.
+
+2. **FFmpeg "shared" libraries (Windows).** torchcodec loads
+   `avcodec/avformat/...` DLLs at runtime. Download an FFmpeg **shared** build
+   (e.g. BtbN `ffmpeg-n7.1-…-win64-gpl-shared`), then either add its `bin\` to
+   your `PATH`, **or** copy the `av*.dll / sw*.dll / postproc*.dll` files next to
+   torchcodec's own DLLs (`…\site-packages\torchcodec\`). Without this you get
+   `RuntimeError: Could not load libtorchcodec`.
+
+3. **GPU (recommended).** A plain install pulls the **CPU** build of PyTorch, so
+   XTTS runs on CPU (tens of seconds per reply). For an NVIDIA GPU, install a
+   CUDA build of torch that matches your driver (check `nvidia-smi`), e.g.:
+   ```
+   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128
+   ```
+   Pick the `cuXXX` matching your driver's CUDA version. On GPU, synthesis is
+   ~1–3 s per reply.
+
+4. **Accept the model license.** Set `COQUI_TOS_AGREED=1` in your `.env`.
+   Otherwise the first `/drive on` hangs forever waiting for an interactive
+   license prompt — the background launcher has no console to answer it.
+
+The first `/drive on` downloads the ~1.8 GB XTTS-v2 model.
+
 ---
 
 ## Security notes

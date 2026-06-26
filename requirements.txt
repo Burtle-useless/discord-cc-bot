@@ -13,9 +13,15 @@ faster-whisper>=1.2.1
 #   cublas64_12.dll and voice transcription fails:
 #       pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
 # Drive-mode voice REPLY (local XTTS-v2 text-to-speech). Only used when you turn on
-# /drive. Heavy install (torch etc.) and the XTTS-v2 model is under the Coqui Public
-# Model License (CPML), which FORBIDS commercial use. Uncomment only if that's OK:
+# /drive. The XTTS-v2 model is under the Coqui Public Model License (CPML), which
+# FORBIDS commercial use. A plain "pip install coqui-tts" is NOT enough by itself --
+# see the README section "Drive mode (voice reply)" for the full, tested steps:
 #       coqui-tts>=0.24.1
+#       transformers>=4.57,<5    # coqui-tts breaks on transformers 5.x (removed symbol)
+#       torchcodec               # PyTorch >=2.9 audio I/O backend
+#       pypinyin                 # required for Chinese (zh) XTTS synthesis
+#   ...plus FFmpeg "shared" DLLs (for torchcodec), a CUDA build of torch for GPU,
+#   and COQUI_TOS_AGREED=1 in your .env. Full details in the README.
 # PowerPoint -> PDF conversion (Windows only, requires PowerPoint installed):
 pywin32>=312
 # Semantic /search (find sessions by meaning, not just literal keywords). Without it,
