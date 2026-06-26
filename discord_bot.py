@@ -772,6 +772,7 @@ _SESSION_FILE   = _BOT_DIR / "discord_session.json"
 _USERS_FILE     = _BOT_DIR / "allowed_users.json"
 _SCHEDULES_FILE = _BOT_DIR / "schedules.json"
 _TITLES_FILE    = _BOT_DIR / "session_titles.json"   # session_id → 自訂/AI 生成的中文標題
+_VECTORS_FILE   = _BOT_DIR / "session_vectors.json"  # session_id → {mtime, vec}，/search 語意搜尋向量快取
 
 # ── 允許使用者持久化 ────────────────────────────────────────────────────
 def _load_allowed_users() -> set[int]:
@@ -2348,6 +2349,133 @@ async def cmd_sessions(interaction: discord.Interaction, scope: str = "mine"):
     header = t("sessions_header_all") if scope == "all" else t("sessions_header_mine")
     await interaction.followup.send(header, view=view, ephemeral=True)
 
+# ── /search 語意搜尋（選配：需 fastembed）────────────────────────────────
+# 裝了 fastembed 就用 embedding 向量做語意搜尋（依「描述內容」找，比關鍵字精準）；
+# 沒裝就自動退回下方 _search_sessions 的字面關鍵字比對，bot 不會因缺套件崩潰。
+_EMBED_MODEL = None           # 延遲載入的 embedding 模型單例
+_EMBED_UNAVAILABLE = False    # 標記 fastembed 不可用，避免每次搜尋重複嘗試載入
+
+def _get_embed_model() -> Optional["TextEmbedding"]:  # noqa: F821（fastembed 為選配，型別不在頂層 import）
+    """延遲載入 multilingual-e5-small 模型（用到才載入，常駐 RAM 接近零）。
+    無 fastembed 或載入失敗時回 None，呼叫端據此退回字面搜尋。"""
+    global _EMBED_MODEL, _EMBED_UNAVAILABLE
+    if _EMBED_UNAVAILABLE:
+        return None
+    if _EMBED_MODEL is not None:
+        return _EMBED_MODEL
+    try:
+        from fastembed import TextEmbedding
+        # e5-small：384 維、支援中文、onnxruntime 後端（不需 PyTorch）
+        _EMBED_MODEL = TextEmbedding(model_name="intfloat/multilingual-e5-small")
+        return _EMBED_MODEL
+    except Exception as e:
+        _EMBED_UNAVAILABLE = True
+        print(f"[search] fastembed 不可用，/search 退回字面搜尋：{e}")
+        return None
+
+def _load_vectors() -> dict:
+    """讀向量快取檔；不存在或損毀時回空 dict。"""
+    try:
+        return json.loads(_VECTORS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+def _save_vectors(cache: dict) -> None:
+    """寫回向量快取檔。"""
+    try:
+        _VECTORS_FILE.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+def _build_or_update_vectors() -> dict:
+    """增量建立/更新所有 bot session 的向量快取，回傳 {session_id: {"mtime", "vec"}}。
+    只對新出現或 mtime 變動的 session 重算 embedding（lazy 觸發、無背景常駐）；
+    無 fastembed 時回空 dict。"""
+    model = _get_embed_model()
+    if model is None:
+        return {}
+    cache = _load_vectors()
+    claude_home = Path.home() / ".claude" / "projects"
+    if not claude_home.exists():
+        return cache
+    # 掃出目前所有 bot session 與其 mtime
+    current: dict[str, float] = {}
+    for proj_dir in claude_home.iterdir():
+        if not proj_dir.is_dir():
+            continue
+        for jf in proj_dir.glob("*.jsonl"):
+            meta = _session_meta(jf)
+            if not meta["is_bot"]:
+                continue
+            current[jf.stem] = jf.stat().st_mtime
+    # 挑出需要重算的（新的或 mtime 變過的）
+    pending: list[tuple[str, float, str]] = []
+    for sid, mtime in current.items():
+        cached = cache.get(sid)
+        if cached and abs(cached.get("mtime", 0.0) - mtime) < 1e-6:
+            continue
+        text = _read_session_text(sid, max_chars=3000)
+        if text:
+            pending.append((sid, mtime, text))
+    # 批次 embedding（e5 規定 passage 要加 "passage: " 前綴）
+    if pending:
+        passages = [f"passage: {t}" for _, _, t in pending]
+        vecs = list(model.embed(passages))
+        for (sid, mtime, _), vec in zip(pending, vecs):
+            cache[sid] = {"mtime": mtime, "vec": [float(x) for x in vec]}
+    # 清掉已不存在的 session，避免快取無限膨脹
+    removed = [sid for sid in cache if sid not in current]
+    for sid in removed:
+        del cache[sid]
+    if pending or removed:
+        _save_vectors(cache)
+    return cache
+
+def _semantic_search(keyword: str, limit: int = 15) -> Optional[list[dict]]:
+    """語意搜尋：用 embedding cosine 相似度排序 session，依「描述內容」找。
+    回傳結構與 _search_sessions 一致，供 cmd_search 共用；
+    無 fastembed/numpy 時回 None，呼叫端據此退回字面搜尋。"""
+    model = _get_embed_model()
+    if model is None:
+        return None
+    try:
+        import numpy as np
+    except Exception:
+        return None
+    cache = _build_or_update_vectors()
+    if not cache:
+        return None
+    # query 端需加 "query: " 前綴
+    qvec = list(model.embed([f"query: {keyword}"]))[0]
+    q = np.asarray(qvec, dtype=np.float32)
+    q = q / (float(np.linalg.norm(q)) + 1e-9)
+    scored: list[tuple[float, str]] = []
+    for sid, rec in cache.items():
+        v = np.asarray(rec.get("vec", []), dtype=np.float32)
+        if v.size == 0:
+            continue
+        v = v / (float(np.linalg.norm(v)) + 1e-9)
+        scored.append((float(q @ v), sid))
+    scored.sort(reverse=True)
+    # 只對前 limit 名讀檔取 meta/snippet，組成與字面搜尋一致的結果
+    titles = _load_titles()
+    claude_home = Path.home() / ".claude" / "projects"
+    results: list[dict] = []
+    for _sim, sid in scored[:limit]:
+        jf = next(claude_home.glob(f"*/{sid}.jsonl"), None)
+        if jf is None:
+            continue
+        meta = _session_meta(jf)
+        snippet = (_read_session_text(sid, max_chars=120) or meta.get("first_prompt") or "")
+        results.append({
+            "session_id": sid,
+            "project_path": meta["cwd"] or str(DEFAULT_DIR),
+            "mtime": jf.stat().st_mtime,
+            "title": titles.get(sid) or meta["title"],
+            "snippet": snippet.replace("\n", " ").strip()[:120],
+        })
+    return results
+
 def _search_sessions(keyword: str, limit: int = 15) -> list[dict]:
     claude_home = Path.home() / ".claude" / "projects"
     if not claude_home.exists():
@@ -2392,7 +2520,10 @@ def _search_sessions(keyword: str, limit: int = 15) -> list[dict]:
 async def cmd_search(interaction: discord.Interaction, keyword: str):
     if not await check_auth(interaction): return
     await interaction.response.defer(ephemeral=True)   # ephemeral：零殘留
-    entries = await asyncio.to_thread(_search_sessions, keyword)
+    # 優先語意搜尋（依描述內容找，需 fastembed）；無 fastembed 時自動退回字面關鍵字搜尋
+    entries = await asyncio.to_thread(_semantic_search, keyword)
+    if entries is None:
+        entries = await asyncio.to_thread(_search_sessions, keyword)
     if not entries:
         await interaction.followup.send(t("search_none", kw=keyword), ephemeral=True)
         return

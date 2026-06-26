@@ -18,3 +18,7 @@ faster-whisper>=1.2.1
 #       coqui-tts>=0.24.1
 # PowerPoint -> PDF conversion (Windows only, requires PowerPoint installed):
 pywin32>=312
+# Semantic /search (find sessions by meaning, not just literal keywords). Without it,
+# /search transparently falls back to literal keyword matching. CPU-only, no PyTorch
+# (onnxruntime backend); first search downloads a ~120MB multilingual model once:
+fastembed>=0.3.0

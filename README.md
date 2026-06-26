@@ -18,7 +18,7 @@ commands, searching the web, and more — then streams the result back to you.
 - **Multi-conversation sidebar** — each Discord channel under a category maps to
   its own Claude session, like tabs. Create, rename, and delete conversations.
 - **Session history** — `/sessions` lists past conversations and restores any of
-  them into a fresh channel; `/search` finds conversations by keyword.
+  them into a fresh channel; `/search` finds conversations by meaning, not just keywords.
 - **Voice input** — send a voice message and it's transcribed locally with
   Whisper (no cloud STT), then handled as a normal prompt.
 - **File transfer** — the bot can upload files back to Discord; you can also
@@ -133,7 +133,7 @@ Now type a message in your bound channel — the bot should respond.
 | `/continue` | Resume the previous session |
 | `/rename` | Rename the current conversation (blank = auto-title) |
 | `/sessions` | List past conversations and restore one |
-| `/search` | Search past conversations by keyword |
+| `/search` | Search past conversations by meaning (semantic; needs `fastembed`, else keyword) |
 | `/stop` | Stop the currently running task |
 | `/status` | Show current status |
 | `/model` | Pick the Claude model |
