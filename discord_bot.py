@@ -1486,7 +1486,10 @@ async def run_claude(
     content, new_sid = "", None
     for m in messages:
         if isinstance(m, ResultMessage):
-            content = m.result or ""
+            # 只在 result 非空時才採用：AskUserQuestion 收尾的空 result 不可蓋掉
+            # 前面文字塊已累積的「問題前說明文字」（否則思考結果會消失）
+            if m.result:
+                content = m.result
             new_sid = m.session_id or new_sid
             usage = getattr(m, "usage", None) or {}
             ctx = (usage.get("input_tokens", 0)
@@ -1816,6 +1819,9 @@ async def _process_answer(channel: discord.TextChannel, chosen: str, state: dict
             _persist_session(state)
         await prog.delete()
         if next_ask:
+            # 先送出說明文字（思考結果），再送下一題問題按鈕
+            if reply and reply != _NO_RESPONSE:
+                await _send_files_and_text(channel, reply)
             await _send_ask_question(channel, next_ask, state)
         elif reply and reply != _NO_RESPONSE:
             await _send_files_and_text(channel, reply)
@@ -3149,6 +3155,11 @@ async def on_message(message: discord.Message):
             await _update_presence(message.channel.id, state["_session_label"])
         await progress_msg.delete()
         if ask_data:
+            # 先送出「問題前的說明文字（思考結果）」，再送問題按鈕；
+            # 否則使用者只會看到問題按鈕、看不到上方的說明文字
+            if reply and reply != _NO_RESPONSE:
+                reply = await _voice_reply(message.channel, reply, speak=(is_voice and _drive_mode))
+                await _send_files_and_text(message.channel, reply)
             await _send_ask_question(message.channel, ask_data, state)
         elif reply and reply != _NO_RESPONSE:
             # 開車模式＋這則是語音輸入 → 解析朗讀版、合成語音檔；回傳去掉標記的文字版
