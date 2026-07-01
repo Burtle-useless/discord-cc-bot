@@ -4,13 +4,13 @@
 主程式對本模組採選配匯入（import 失敗即停用開車模式、降級為純文字 bot）。
 
 概念：開車時把語音訊息轉文字（STT）、把 CC 回覆的朗讀版合成語音（TTS）；兩個模型
-都延遲載入、可卸載釋放 VRAM。語音相關的重量級套件（faster-whisper、coqui-tts、
+都延遲載入、可卸載釋放 VRAM。語音相關的重量級套件（faster-whisper、f5-tts、
 torch）一律在函式內延遲匯入——沒安裝時，只有真的呼叫載入類函式才會 ImportError，
 由呼叫端負責 try/except 降級；只做字串處理（parse_speak）或讀寫開關狀態
 （load_drive/save_drive）則完全不需要那些套件。
 
-授權提醒：XTTS-v2 模型為 Coqui Public Model License（CPML），禁止商用。屬選配功能，
-只有開車模式會載入；下游若要商用請改用其他引擎或自負授權責任。
+授權提醒：F5-TTS 模型為 CC-BY-NC 4.0（禁止商用）。屬選配功能，只有開車模式會載入；
+下游若要商用請改用其他引擎或自負授權責任。
 """
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from pathlib import Path
 _SPEAK_MARKER = re.compile(r"<<<SPEAK>>>(.*?)<<<ENDSPEAK>>>", re.DOTALL)
 
 
-# ── GPU 共用工具（Whisper 與 XTTS 都會用到）──────────────────────────────
+# ── GPU 共用工具（Whisper 與 F5-TTS 都會用到）─────────────────────────────
 def add_cuda_dll_path() -> None:
     """把 nvidia cuda_runtime/cuBLAS/cuDNN/nvrtc 的 DLL 目錄加進 PATH，否則 GPU 推論時
     ctranslate2/torch 會找不到 cublas64_12.dll（它走 PATH，不吃 add_dll_directory）。"""
@@ -89,40 +89,64 @@ def unload_whisper() -> None:
         free_vram()
 
 
-# ── 文字轉語音（XTTS-v2，本機 GPU，開車回覆用）────────────────────────────
-_xtts_model = None  # 單例，只載入一次
+# ── 文字轉語音（F5-TTS，本機 GPU，開車回覆用）─────────────────────────────
+# F5-TTS 是零樣本聲音克隆模型，需要一段參考音 + 對應逐字稿。這裡直接用 f5-tts 套件自帶
+# 的範例參考音（infer/examples/basic），因此本 repo 不必附任何音檔，也沒有授權疑慮。
+_f5_model = None  # 單例，只載入一次
+_f5_refs: dict[str, tuple[str, str]] = {}  # ref_lang -> (參考音路徑, 逐字稿)，延遲解析
 
 
-def get_xtts():
-    """延遲載入 XTTS-v2（單例）；首次會下載模型約 1.8GB。GPU 起不來自動退 CPU。"""
-    global _xtts_model
-    if _xtts_model is None:
+def _f5_ref(ref_lang: str) -> tuple[str, str]:
+    """依語系取得 F5 參考音（路徑, 逐字稿）；用套件內建範例，zh 用中文、其餘用英文。結果快取。"""
+    key = "zh" if ref_lang == "zh" else "en"
+    if key not in _f5_refs:
+        import f5_tts
+        base = Path(f5_tts.__file__).parent / "infer" / "examples" / "basic"
+        if key == "zh":
+            _f5_refs[key] = (str(base / "basic_ref_zh.wav"),
+                             "对，这就是我，万人敬仰的太乙真人。")
+        else:
+            _f5_refs[key] = (str(base / "basic_ref_en.wav"),
+                             "Some call me nature, others call me mother nature.")
+    return _f5_refs[key]
+
+
+def get_f5tts():
+    """延遲載入 F5-TTS（單例）；首次會下載 F5TTS_v1_Base 約 1.3GB。GPU 起不來自動退 CPU。"""
+    global _f5_model
+    if _f5_model is None:
         add_cuda_dll_path()
-        from TTS.api import TTS
+        from f5_tts.api import F5TTS
         try:
-            _xtts_model = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to("cuda")
-            print("[XTTS] xtts_v2 已載入 GPU", flush=True)
+            _f5_model = F5TTS(device="cuda")
+            print("[F5] F5TTS_v1_Base 已載入 GPU", flush=True)
         except Exception as e:
-            print(f"[XTTS] GPU 失敗，改用 CPU：{e}", flush=True)
-            _xtts_model = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to("cpu")
-    return _xtts_model
+            print(f"[F5] GPU 失敗，改用 CPU：{e}", flush=True)
+            _f5_model = F5TTS(device="cpu")
+    return _f5_model
 
 
-def synthesize(text: str, out_path: str, language: str = "en",
-               speaker: str = "Ana Florence") -> str:
+def synthesize(text: str, out_path: str, ref_lang: str = "en") -> str:
     """把文字合成成語音檔（阻塞式，呼叫端用 asyncio.to_thread 包起來）。回傳檔案路徑。
-    language 由呼叫端依介面語系決定（本模組不依賴主程式的 i18n）。"""
-    model = get_xtts()
-    # XTTS-v2 是聲音克隆模型，需指定內建說話者；language 跟著呼叫端傳入
-    model.tts_to_file(text=text, file_path=out_path, speaker=speaker, language=language)
+    ref_lang 由呼叫端依介面語系決定（zh/en），選對應的內建參考音（本模組不依賴主程式的 i18n）。"""
+    model = get_f5tts()
+    ref_audio, ref_text = _f5_ref(ref_lang)
+    # F5-TTS 零樣本克隆：用套件自帶參考音 + 逐字稿，生成語言由 text 內容自動判定
+    model.infer(
+        ref_file=ref_audio,
+        ref_text=ref_text,
+        gen_text=text,
+        file_wave=out_path,
+        remove_silence=False,
+    )
     return out_path
 
 
-def unload_xtts() -> None:
-    """卸載 XTTS 模型、釋放顯存（開車模式關閉時呼叫）。"""
-    global _xtts_model
-    if _xtts_model is not None:
-        _xtts_model = None
+def unload_f5tts() -> None:
+    """卸載 F5-TTS 模型、釋放顯存（開車模式關閉時呼叫）。"""
+    global _f5_model
+    if _f5_model is not None:
+        _f5_model = None
         free_vram()
 
 

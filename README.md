@@ -38,6 +38,32 @@ commands, searching the web, and more — then streams the result back to you.
 
 ---
 
+## How this compares
+
+Most "Claude + chat" bots wrap the **Claude API** — a stateless chat box. This one
+drives the **Claude Code CLI** on your own PC, so every message has real file,
+shell, and web access with full session state. A few things it does that similar
+bridges (mostly Telegram, mostly single-session and text-only) generally don't:
+
+- **Sessions as channels, not one thread.** Each Discord channel under a category
+  is its own persistent Claude Code session — create, rename, restore, and
+  semantic-search across them. Most bridges give you a single conversation.
+- **Voice in *and* out, fully local.** "Drive mode" transcribes your voice
+  messages with Whisper and speaks Claude's reply back with F5-TTS — all on your
+  own GPU, no cloud STT/TTS. Made for hands-free/driving use.
+- **Multi-session coordination.** Separate sessions can broadcast tasks to a
+  shared channel and watch each other's progress — closer to a small agent team
+  than a single chat.
+- **Git worktree parallelism.** Spin off an isolated worktree per conversation so
+  parallel edits don't collide, then merge back from Discord.
+- **Built for trust.** It runs with `bypassPermissions`, so every turn shows the
+  exact command it's running, states its plan before acting, and pops a confirm
+  button before destructive actions (delete, `git push`, shutdown…).
+- **Runs unattended on Windows.** Silent background launcher, a tiny start/stop
+  control panel, crash self-heal, rate-limit retries, and context auto-compaction.
+
+---
+
 ## Prerequisites
 
 1. **Windows** (this build is Windows-only).
@@ -168,41 +194,36 @@ Some features need extra packages (already listed in `requirements.txt`):
 
 If you don't want a feature, you can skip its dependency.
 
-**Removing voice entirely.** All the voice code — Whisper speech-to-text, XTTS
+**Removing voice entirely.** All the voice code — Whisper speech-to-text, F5-TTS
 text-to-speech, and the GPU helpers — lives in one standalone, optional module:
 `drive_core.py`. The main bot imports it optionally, so if you never want voice
 you can simply **delete `drive_core.py`**: the bot detects it's gone, runs
 text-only with no errors, and `/drive` just reports that drive mode isn't
 installed. Nothing else needs editing.
 
-### Drive mode (voice reply, XTTS-v2)
+### Drive mode (voice reply, F5-TTS)
 
-> ⚠️ The XTTS-v2 model is under the **Coqui Public Model License (CPML)** —
-> **non-commercial use only**. `/drive` is off by default; skip this whole
-> section unless you want voice *replies* (voice *input* needs only
-> `faster-whisper`, above).
+> ⚠️ The F5-TTS model is under **CC-BY-NC 4.0** — **non-commercial use only**.
+> `/drive` is off by default; skip this whole section unless you want voice
+> *replies* (voice *input* needs only `faster-whisper`, above).
 
-A plain `pip install coqui-tts` is **not enough** on its own — these are the
-exact steps we tested. Run them **inside your venv**:
+Voice reply now uses **F5-TTS**, which is far simpler to set up than the old
+XTTS path — no FFmpeg DLLs, no `torchcodec`, no license env var. Run this
+**inside your venv**:
 
-1. Python packages (note the `transformers` pin — coqui-tts breaks on
-   `transformers` 5.x, which removed a symbol it imports):
-   ```
-   pip install "coqui-tts>=0.24.1" "transformers>=4.57,<5" torchcodec pypinyin
-   ```
-   - `torchcodec` — PyTorch ≥ 2.9 uses it for audio I/O.
-   - `pypinyin` — required for Chinese (`zh`) synthesis.
+```
+pip install f5-tts
+```
 
-2. **FFmpeg "shared" libraries (Windows).** torchcodec loads
-   `avcodec/avformat/...` DLLs at runtime. Download an FFmpeg **shared** build
-   (e.g. BtbN `ffmpeg-n7.1-…-win64-gpl-shared`), then either add its `bin\` to
-   your `PATH`, **or** copy the `av*.dll / sw*.dll / postproc*.dll` files next to
-   torchcodec's own DLLs (`…\site-packages\torchcodec\`). Without this you get
-   `RuntimeError: Could not load libtorchcodec`.
+1. **Reference voice — nothing to do.** F5-TTS is a zero-shot voice clone, so it
+   needs a short reference clip. This bot reuses the sample that ships *inside*
+   the `f5-tts` package, so there's nothing to record, download, or place, and no
+   audio in this repo. The English UI uses the English sample; the Chinese UI
+   (`BOT_LANG=zh-TW`) uses the Chinese one.
 
-3. **GPU (recommended).** A plain install pulls the **CPU** build of PyTorch, so
-   XTTS runs on CPU (tens of seconds per reply). For an NVIDIA GPU, install a
-   **CUDA 12.x** build of torch, e.g.:
+2. **GPU (recommended).** A plain install pulls the **CPU** build of PyTorch, so
+   synthesis takes minutes per reply. For an NVIDIA GPU, install a **CUDA 12.x**
+   build of torch, e.g.:
    ```
    pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu126
    ```
@@ -210,13 +231,9 @@ exact steps we tested. Run them **inside your venv**:
    supports CUDA 13. Voice *input* (faster-whisper / ctranslate2) loads CUDA-12
    cuDNN, and a cu13 torch build clashes with it in the same process
    (`CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH`), which makes /drive voice replies
-   silently fall back to text. On GPU, synthesis is ~1–3 s per reply.
+   silently fall back to text. On GPU, synthesis is a few seconds per reply.
 
-4. **Accept the model license.** Set `COQUI_TOS_AGREED=1` in your `.env`.
-   Otherwise the first `/drive on` hangs forever waiting for an interactive
-   license prompt — the background launcher has no console to answer it.
-
-The first `/drive on` downloads the ~1.8 GB XTTS-v2 model.
+The first `/drive on` downloads the F5-TTS model (~1.3 GB) and its vocoder.
 
 ---
 

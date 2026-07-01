@@ -771,12 +771,12 @@ NOTIFY_AFTER_SEC = 60                        # 任務耗時超過此秒數，完
 INACTIVITY_TIMEOUT = 600                      # CC 連續無任何輸出超過此秒數才視為卡死（不限總時長，長工作流不會被誤殺）
 
 # ── 版本與更新內容 ──────────────────────────────────────────────────────
-BOT_VERSION = "1.20.0"
+BOT_VERSION = "1.21.0"
 CHANGE_TYPE = "feat"
 CHANGELOG = """\
-• Drive mode's voice core (Whisper speech-to-text, XTTS text-to-speech, GPU helpers) is now a standalone optional module (drive_core.py)
-• The main bot imports it optionally: remove drive_core.py and the bot cleanly falls back to text-only — no crash, and /drive reports it isn't installed
-• Otherwise a pure refactor: with the module present, drive mode behaves exactly as before
+• Drive-mode voice reply now uses F5-TTS instead of XTTS-v2 — much better Chinese, and a far simpler install (no FFmpeg/torchcodec, no license env var)
+• The reference voice comes from f5-tts's own bundled sample, so no audio ships in this repo; the English UI uses the English sample, the Chinese UI the Chinese one
+• tmp/ no longer piles up: voice-input clips are deleted right after transcription, and files older than 24h are swept on startup
 """
 
 _CHANGE_TYPE_LABEL = {
@@ -1702,10 +1702,10 @@ async def _capture_screenshot() -> Optional[Path]:
     return await asyncio.to_thread(_capture_screenshot_sync)
 
 # ── 開車模式語音核心（STT/TTS/GPU 工具）已抽到 drive_core.py（選配、可整包移除）──
-# 只留與介面語系綁定的朗讀語言對應（drive_core 為保持純邏輯，不依賴主程式 i18n）。
-def _xtts_language() -> str:
-    """朗讀語言：跟著介面語系（zh-TW -> 中文、其餘 -> 英文）。"""
-    return "zh-cn" if BOT_LANG == "zh-TW" else "en"
+# 只留與介面語系綁定的朗讀參考音對應（drive_core 為保持純邏輯，不依賴主程式 i18n）。
+def _speak_ref_lang() -> str:
+    """朗讀參考音語系：跟著介面語系（zh-TW -> 中文參考音、其餘 -> 英文）。"""
+    return "zh" if BOT_LANG == "zh-TW" else "en"
 
 # ── 簡報轉 PDF（簡報是視覺導向，轉 PDF 讓 CC 逐頁視覺讀取更準）────────────
 def _pptx_to_pdf_sync(src: Path) -> Optional[Path]:
@@ -1818,14 +1818,14 @@ async def _voice_reply(channel, reply: str, speak: bool) -> str:
     try:
         out = Path(__file__).parent / "tmp" / f"speak_{uuid.uuid4().hex[:8]}.wav"
         out.parent.mkdir(exist_ok=True)
-        await asyncio.to_thread(drive_core.synthesize, spoken, str(out), _xtts_language())
+        await asyncio.to_thread(drive_core.synthesize, spoken, str(out), _speak_ref_lang())
         await channel.send(file=discord.File(str(out)))
         try:
             out.unlink()
         except Exception:
             pass
     except Exception as e:
-        print(f"[XTTS] 合成失敗，降級純文字：{e}", flush=True)
+        print(f"[F5] 合成失敗，降級純文字：{e}", flush=True)
     return clean
 
 # ── 分段送訊息 ─────────────────────────────────────────────────────────
@@ -2309,22 +2309,36 @@ async def check_auth(interaction: discord.Interaction, owner_only: bool = False)
         return False
     return True
 
+def _sweep_tmp(max_age_h: int = 24) -> None:
+    """清掃 tmp/ 內超過 max_age_h 小時的舊檔（收進來的附件、語音等），避免長期堆積。"""
+    tmp_dir = Path(__file__).parent / "tmp"
+    if not tmp_dir.is_dir():
+        return
+    cutoff = time.time() - max_age_h * 3600
+    for f in tmp_dir.iterdir():
+        try:
+            if f.is_file() and f.stat().st_mtime < cutoff:
+                f.unlink()
+        except Exception:
+            pass
+
 @bot.event
 async def on_ready():
     await bot.tree.sync()
     print(t("ready_log", user=bot.user), flush=True)
+    asyncio.create_task(asyncio.to_thread(_sweep_tmp))   # 啟動時清掃 tmp/ 舊檔
     asyncio.create_task(_schedule_loop())
     asyncio.create_task(_client_reaper())   # 長駐 client 閒置回收（A'）
     # 開車模式：上次關機時若為開啟，重啟自動恢復載入兩個模型（開車中崩潰可自癒）；
     # 在家（預設 off）則完全不載入語音模型，不吃 GPU/VRAM。
     if _drive_mode and drive_core:
         asyncio.create_task(asyncio.to_thread(drive_core.get_whisper))
-        async def _bg_xtts() -> None:
+        async def _bg_f5() -> None:
             try:
-                await asyncio.to_thread(drive_core.get_xtts)
+                await asyncio.to_thread(drive_core.get_f5tts)
             except Exception as e:
-                print(f"[XTTS] 預載失敗：{e}", flush=True)
-        asyncio.create_task(_bg_xtts())
+                print(f"[F5] 預載失敗：{e}", flush=True)
+        asyncio.create_task(_bg_f5())
     # 多 session 側欄：註冊常駐按鈕 + 確保分類/入口頻道存在
     bot.add_view(NewChatView())   # 讓重啟前發出的按鈕仍可點
     main_ch = bot.get_channel(ALLOWED_CHANNEL)
@@ -2777,7 +2791,7 @@ async def cmd_drive(interaction: discord.Interaction, mode: str):
         await interaction.response.send_message(t("drive_on_loading"))
         await asyncio.to_thread(drive_core.get_whisper)
         try:
-            await asyncio.to_thread(drive_core.get_xtts)
+            await asyncio.to_thread(drive_core.get_f5tts)
         except Exception as e:
             # TTS 載入失敗：語音輸入仍可用，只是不能語音回覆（仍維持開車模式）
             await interaction.followup.send(t("drive_xtts_fail", ex=e))
@@ -2788,7 +2802,7 @@ async def cmd_drive(interaction: discord.Interaction, mode: str):
         drive_core.save_drive(_DRIVE_FILE, False)
         # 卸載兩個模型、釋放 VRAM，回到純文字 bot
         await asyncio.to_thread(drive_core.unload_whisper)
-        await asyncio.to_thread(drive_core.unload_xtts)
+        await asyncio.to_thread(drive_core.unload_f5tts)
         await interaction.response.send_message(t("drive_off"))
 
 @bot.tree.command(name="cd", description=t("cmd_cd_desc"))
@@ -3174,6 +3188,8 @@ async def on_message(message: discord.Message):
                         voice_texts.append(transcript)
                 except Exception as ex:
                     failed.append(t("voice_fail", filename=att.filename, ex=ex))
+                finally:
+                    dest.unlink(missing_ok=True)  # 語音輸入音檔只需轉錄一次，用完即刪，不堆積
                 continue
             try:
                 req = urllib.request.Request(att.url, headers={"User-Agent": "Mozilla/5.0"})
