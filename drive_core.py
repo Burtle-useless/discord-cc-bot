@@ -14,8 +14,10 @@ torch）一律在函式內延遲匯入——沒安裝時，只有真的呼叫載
 """
 from __future__ import annotations
 
+import contextlib
 import gc
 import importlib
+import io
 import json
 import os
 import re
@@ -101,7 +103,8 @@ def _f5_ref(ref_lang: str) -> tuple[str, str]:
     key = "zh" if ref_lang == "zh" else "en"
     if key not in _f5_refs:
         import f5_tts
-        base = Path(f5_tts.__file__).parent / "infer" / "examples" / "basic"
+        # f5_tts 是 namespace package，__file__ 可能為 None；用 __path__ 定位套件目錄
+        base = Path(list(f5_tts.__path__)[0]) / "infer" / "examples" / "basic"
         if key == "zh":
             _f5_refs[key] = (str(base / "basic_ref_zh.wav"),
                              "对，这就是我，万人敬仰的太乙真人。")
@@ -131,14 +134,17 @@ def synthesize(text: str, out_path: str, ref_lang: str = "en") -> str:
     ref_lang 由呼叫端依介面語系決定（zh/en），選對應的內建參考音（本模組不依賴主程式的 i18n）。"""
     model = get_f5tts()
     ref_audio, ref_text = _f5_ref(ref_lang)
-    # F5-TTS 零樣本克隆：用套件自帶參考音 + 逐字稿，生成語言由 text 內容自動判定
-    model.infer(
-        ref_file=ref_audio,
-        ref_text=ref_text,
-        gen_text=text,
-        file_wave=out_path,
-        remove_silence=False,
-    )
+    # F5-TTS 零樣本克隆：用套件自帶參考音 + 逐字稿，生成語言由 text 內容自動判定。
+    # F5 內部會 print 參考／生成逐字稿；中文範例是簡體，Windows 主控台若為 cp950 會
+    # UnicodeEncodeError 炸掉合成，故把 infer 期間的 stdout 導到記憶體隔離掉。
+    with contextlib.redirect_stdout(io.StringIO()):
+        model.infer(
+            ref_file=ref_audio,
+            ref_text=ref_text,
+            gen_text=text,
+            file_wave=out_path,
+            remove_silence=False,
+        )
     return out_path
 
 
