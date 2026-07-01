@@ -10,6 +10,7 @@ session_titles.json
 last_version.json
 account_plan.json
 drive_mode.json
+user_messages.jsonl
 
 # Logs
 *.log

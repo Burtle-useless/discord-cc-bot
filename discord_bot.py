@@ -22,6 +22,7 @@ from claude_agent_sdk import (
     AssistantMessage,
     ToolUseBlock,
     StreamEvent,
+    HookMatcher,
 )
 from claude_agent_sdk._errors import MessageParseError
 from claude_agent_sdk._internal.message_parser import parse_message
@@ -96,14 +97,18 @@ _STRINGS: dict[str, dict[str, str]] = {
             "the bot turns the options into Discord buttons; the user's click comes back as the next message. "
             "Important: after calling AskUserQuestion, output no extra text and do not assume it failed — just wait for the user's reply. "
             "Questioning discipline (important): asking questions on Discord is costly, so stay focused — "
-            "at most 1-2 questions at a time, tightly tied to the user's original request, no tangents; "
+            "ask only 1 question at a time (Discord is one-question-one-answer, so multiple questions get eaten), tightly tied to the user's original request, no tangents; "
             "do not exceed 4-5 rounds of follow-up for the whole task; once you have enough, stop asking and act or conclude. "
             "If the user asks you to send them a file, just output a file marker in your reply, strictly in this format (keep the brackets): "
             "[[FILE: absolute path of the file]], "
             "and the bot will upload that file to Discord. You can output several markers to send multiple files. "
             "[Memory honesty] Long conversations get auto-compacted, so you may not remember changes you made earlier. "
             "When you see code in the project you don't remember, do not assert it was another session or wasn't you; "
-            "verify with git log, file mtimes, or the compaction summary, and if you can't, honestly say you're unsure whether it was you — never fabricate a source."
+            "verify with git log, file mtimes, or the compaction summary, and if you can't, honestly say you're unsure whether it was you — never fabricate a source. "
+            "[Transparent execution] The user must be able to tell what you're doing at any moment. "
+            "Before you start any real operation (reading/writing files, running commands, git, web search), "
+            "first say in one short sentence what you're about to do and why, then act; "
+            "especially for actions that modify files or run system commands, state your intent clearly before executing — do not do it all silently and only report afterward."
         ),
         # 跨頻道協作（AI Lounge）。coord_rule 會在啟用時附加到 system_prompt 後面，
         # 因此一律用文字描述、不嵌入反引號/錢字號等會破壞 Windows init 的危險字元。
@@ -146,6 +151,15 @@ _STRINGS: dict[str, dict[str, str]] = {
         "question_ended": "ℹ️ This question has ended.",
         "selected": "✅ Selected: **{chosen}**",
         "select_placeholder": "Pick an option...",
+        # 危險動作確認（第二階段）
+        "confirm_prompt": "⚠️ **Confirm dangerous action** — Claude wants to run:\n{detail}\nThis looks destructive. Tap **Execute** to allow, **Cancel** to skip. Auto-cancels in {mins} min with no response.",
+        "confirm_exec": "✅ Execute",
+        "confirm_cancel": "❌ Cancel",
+        "confirm_done_exec": "✅ **Executed** (you approved)",
+        "confirm_done_cancel": "❌ **Cancelled** (you declined)",
+        "confirm_deny_cancel": "The user tapped Cancel, so this dangerous action was NOT run. Stop and ask the user how to proceed.",
+        "confirm_deny_timeout": "The user did not confirm within {mins} minutes, so this dangerous action was skipped for safety. Do not retry it automatically; ask the user.",
+        "confirm_no_channel": "Could not reach the Discord channel to confirm, so this dangerous action was skipped for safety.",
         # 倒數
         "reset_soon": "resetting soon",
         "in_days": "in {d}d {h}h",
@@ -410,7 +424,7 @@ _STRINGS: dict[str, dict[str, str]] = {
             "bot 會自動把選項轉成 Discord 按鈕顯示給使用者，使用者點選後答案會作為下一則訊息傳回給你。"
             "重要：呼叫 AskUserQuestion 後，不要輸出任何額外文字，也不要假設工具失敗，直接等待使用者的回應即可。"
             "提問紀律（重要）：在 Discord 上問問題成本高，務必聚焦——"
-            "每次最多問 1~2 題，問題必須緊扣使用者原始需求，不要發散或歪題；"
+            "每次只問 1 題（Discord 一問一答，一次只能收一題答案，問多題會被吞掉），問題必須緊扣使用者原始需求，不要發散或歪題；"
             "整個任務累積追問不要超過 4~5 輪，蒐集到足夠資訊就停止提問、直接動手或給結論。"
             "若使用者要你把檔案傳給他，只要在回覆中輸出檔案標記，格式嚴格如下（方括號照打）："
             "[[FILE: 檔案的絕對路徑]]，"
@@ -418,6 +432,9 @@ _STRINGS: dict[str, dict[str, str]] = {
             "【記憶誠實】長對話的歷史會被自動壓縮，你可能對自己稍早做過的改動沒有印象。"
             "看到專案裡你不記得的程式碼時，不要斷言是別的 session 做的、或不是你做的；"
             "先用 git log、檔案修改時間、或壓縮摘要查證，查不到就如實說無法確定是否為你先前所做，絕不杜撰來源。"
+            "【透明執行】使用者要能隨時知道你在做什麼。每當你要開始一段實際操作"
+            "（讀寫檔案、執行指令、git、搜尋網路）之前，先用一句簡短中文說明你接下來要做什麼、為什麼，再動手；"
+            "尤其會改動檔案或執行系統指令這類動作，務必先講清楚意圖再執行，不要悶著頭一次做完才說。"
         ),
         # 跨頻道協作（AI Lounge）。coord_rule 啟用時會附加到 system_prompt 後面，
         # 因此一律用文字描述、不嵌入反引號/錢字號等會破壞 Windows init 的危險字元。
@@ -455,6 +472,15 @@ _STRINGS: dict[str, dict[str, str]] = {
         "question_ended": "ℹ️ 此問題已結束。",
         "selected": "✅ 已選擇：**{chosen}**",
         "select_placeholder": "選擇一個選項...",
+        # 危險動作確認（第二階段）
+        "confirm_prompt": "⚠️ **危險動作確認** — Claude 想執行：\n{detail}\n這看起來具破壞性。按 **執行** 放行、**取消** 略過。{mins} 分鐘無回應自動取消。",
+        "confirm_exec": "✅ 執行",
+        "confirm_cancel": "❌ 取消",
+        "confirm_done_exec": "✅ **已執行**（你已核准）",
+        "confirm_done_cancel": "❌ **已取消**（你選擇不執行）",
+        "confirm_deny_cancel": "使用者按了取消，因此這個危險動作未執行。請停下來詢問使用者要怎麼處理。",
+        "confirm_deny_timeout": "使用者在 {mins} 分鐘內未確認，為安全起見略過這個危險動作。不要自動重試，請詢問使用者。",
+        "confirm_no_channel": "無法連到 Discord 頻道進行確認，為安全起見略過這個危險動作。",
         "reset_soon": "即將重置",
         "in_days": "{d} 天 {h} 小時後",
         "in_hours": "{h} 小時 {m} 分後",
@@ -739,12 +765,15 @@ NOTIFY_AFTER_SEC = 60                        # 任務耗時超過此秒數，完
 INACTIVITY_TIMEOUT = 600                      # CC 連續無任何輸出超過此秒數才視為卡死（不限總時長，長工作流不會被誤殺）
 
 # ── 版本與更新內容 ──────────────────────────────────────────────────────
-BOT_VERSION = "1.18.1"
-CHANGE_TYPE = "fix"
+BOT_VERSION = "1.19.0"
+CHANGE_TYPE = "feat"
 CHANGELOG = """\
-🔧 **v1.18.1 — bug fixes**
-• AskUserQuestion: the explanation text above the buttons now shows correctly (previously only a row of buttons appeared)
-• /rename: now actually renames the Discord channel (previously it only changed the internal title)
+• Thinking message now shows "📥 Current command" at the top — the live command being processed, so you can verify it's really running what you asked and catch phantom or injected commands
+• States the plan first: before any real operation (reading/writing files, running commands, git), it says what it's about to do before acting
+• Dangerous actions highlighted: file edits / commands / git are marked with ⚠️, edits show the full path and commands show more of their content
+• Confirm button for dangerous commands: destructive commands (delete, format, git push, shutdown, etc.) pop a button for your approval first, auto-cancelling on timeout
+• Fixed AskUserQuestion eating extra questions when several were asked at once: now asks one question at a time
+• Added a raw user-message ledger: your messages are stored verbatim for later verification
 """
 
 _CHANGE_TYPE_LABEL = {
@@ -774,6 +803,19 @@ _USERS_FILE     = _BOT_DIR / "allowed_users.json"
 _SCHEDULES_FILE = _BOT_DIR / "schedules.json"
 _TITLES_FILE    = _BOT_DIR / "session_titles.json"   # session_id → 自訂/AI 生成的中文標題
 _VECTORS_FILE   = _BOT_DIR / "session_vectors.json"  # session_id → {mtime, vec}，/search 語意搜尋向量快取
+_USER_LEDGER_FILE = _BOT_DIR / "user_messages.jsonl"  # 使用者原始訊息帳本（append-only，供查證，勿併入 git）
+
+
+def _append_user_ledger(channel_id: int, author: str, text: str) -> None:
+    """把使用者原始訊息 append 到帳本檔（append-only、不受 AI 壓縮影響），
+    作為日後查證『使用者到底說過什麼』的第一手來源。永不因寫檔失敗中斷主流程。"""
+    try:
+        rec = {"ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+               "channel_id": channel_id, "author": author, "text": text}
+        with _USER_LEDGER_FILE.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
 
 # ── 允許使用者持久化 ────────────────────────────────────────────────────
 def _load_allowed_users() -> set[int]:
@@ -1081,7 +1123,13 @@ def _build_options(state: dict) -> ClaudeAgentOptions:
         cli_path=CLAUDE_CLI,
         model=state.get("model"),
         effort=state.get("effort"),
+        # 維持全放行（自動執行，不干擾工作流）。危險指令確認改掛 PreToolUse hook：
+        # 實測 headless/SDK 下 can_use_tool 回呼不會被觸發，但 PreToolUse hook 即使在
+        # bypassPermissions 也照樣觸發、且 permissionDecision="deny" 能真正擋下工具。
+        # 安全動作 hook 回空 dict 放行、破壞性指令才跳確認按鈕。
         permission_mode="bypassPermissions",
+        hooks={"PreToolUse": [HookMatcher(matcher="Bash|PowerShell",
+                                          hooks=[_make_pretool_hook(state)])]},
         fallback_model=FALLBACK_MODEL,
         max_buffer_size=MAX_BUFFER_SIZE,
         # 此 system_prompt 會透過管線傳給 CC 子進程。實測在 Windows 上，內含 LaTeX
@@ -1154,19 +1202,145 @@ _ICONS = {
     "AskUserQuestion":"❓",
 }
 
+# 危險動作：會改檔案或執行系統指令的工具，在思考訊息裡要醒目標出並顯示完整內容
+_DANGER_TOOLS = {"Bash", "PowerShell", "Write", "Edit", "MultiEdit"}
+
 def _fmt_tool(name: str, inp: dict) -> str:
     icon = _ICONS.get(name, "🔧")
-    if name in ("Read","Write","Edit","Glob") and "file_path" in inp:
+    danger = name in _DANGER_TOOLS
+    if name in ("Write", "Edit", "MultiEdit") and "file_path" in inp:
+        detail = inp["file_path"]                          # 改檔：顯示完整路徑，看清動的是哪個檔
+    elif name in ("Read", "Glob") and "file_path" in inp:
         detail = Path(inp["file_path"]).name
-    elif name in ("Bash","PowerShell") and "command" in inp:
-        detail = inp["command"][:60].replace("\n"," ")
+    elif name in ("Bash", "PowerShell") and "command" in inp:
+        detail = inp["command"][:120].replace("\n", " ")   # 執行指令：顯示更完整的指令內容
     elif name == "Grep" and "pattern" in inp:
         detail = inp["pattern"][:50]
     elif name == "WebSearch" and "query" in inp:
         detail = inp["query"][:60]
     else:
         detail = str(list(inp.values())[0])[:60] if inp else ""
+    detail = detail.replace("`", "'")                      # 反引號會破壞 Discord 標記，換掉
+    if danger:                                             # 危險動作用 ⚠️ 標出，讓使用者一眼分辨
+        return f"⚠️ {icon} **{name}**  `{detail}`" if detail else f"⚠️ {icon} **{name}**"
     return f"{icon} **{name}**  `{detail}`" if detail else f"{icon} **{name}**"
+
+# ── 危險指令確認（第二階段）──────────────────────────────────────────────
+# 逾時秒數（逾時＝取消不執行）。刻意小於 INACTIVITY_TIMEOUT，確認期間才不會被誤判卡死。
+_CONFIRM_TIMEOUT_SEC = 300
+# 破壞性指令樣式（大小寫不敏感、以詞界比對避免 confirm 之類誤判）。只攔最常見的高風險操作，
+# 命中才跳確認按鈕、其餘一律放行——這是「確認」而非硬性沙箱，可視需要增修這份清單。
+_DESTRUCTIVE_RE = re.compile(
+    r"(?:\brm\s+-[rf]|\brmdir\b|\brd\s+/s|\bdel\s+/|\berase\s+/|"
+    r"\bremove-item\b|\bformat\s|\bmkfs\b|\bdd\s+if=|"
+    r"\bgit\s+push\b|\bgit\s+reset\s+--hard\b|\bgit\s+clean\s+-|\bgit\s+checkout\s+--\s|\bgit\s+branch\s+-D\b|"
+    r"\bshutdown\b|\brestart-computer\b|\bstop-computer\b|\btaskkill\b|\bstop-process\b|\bstop-service\b|"
+    r"\breg\s+delete\b|\bdiskpart\b|\bsc\s+delete\b|\bcipher\s+/w)",
+    re.IGNORECASE,
+)
+
+
+def _needs_confirm(tool_name: str, tool_input: dict) -> bool:
+    """判斷這次工具呼叫是否為需確認的破壞性動作。只比對會執行任意系統指令的
+    Bash/PowerShell（惡意夾帶／幻象指令的主要途徑）。判斷出錯時放行，不阻斷 CC。"""
+    try:
+        if tool_name in ("Bash", "PowerShell"):
+            return bool(_DESTRUCTIVE_RE.search(str(tool_input.get("command", ""))))
+    except Exception:
+        return False
+    return False
+
+
+async def _confirm_dangerous(channel: discord.TextChannel, tool_name: str,
+                             tool_input: dict) -> Optional[bool]:
+    """送出危險動作確認按鈕並等待回應。回傳 True=執行／False=取消／None=逾時。永不拋例外。"""
+    detail = _fmt_tool(tool_name, tool_input)
+    mins = max(1, _CONFIRM_TIMEOUT_SEC // 60)
+    prompt = t("confirm_prompt", detail=detail, mins=mins)
+    result: dict = {"v": None}
+    view = discord.ui.View(timeout=_CONFIRM_TIMEOUT_SEC)
+    sent: dict = {"msg": None}
+
+    async def _click(inter: discord.Interaction, ok: bool) -> None:
+        result["v"] = ok
+        for it in view.children:
+            it.disabled = True
+        note = t("confirm_done_exec") if ok else t("confirm_done_cancel")
+        try:
+            await inter.response.edit_message(content=prompt + "\n\n" + note, view=view)
+        except Exception:
+            try:
+                await inter.response.defer()
+            except Exception:
+                pass
+        view.stop()
+
+    async def _on_timeout() -> None:
+        for it in view.children:
+            it.disabled = True
+        m = sent.get("msg")
+        if m is not None:
+            try:
+                await m.edit(view=view)
+            except Exception:
+                pass
+
+    view.on_timeout = _on_timeout
+    ok_btn = discord.ui.Button(label=t("confirm_exec"), style=discord.ButtonStyle.danger)
+    no_btn = discord.ui.Button(label=t("confirm_cancel"), style=discord.ButtonStyle.secondary)
+
+    async def _ok(inter: discord.Interaction) -> None:
+        await _click(inter, True)
+
+    async def _no(inter: discord.Interaction) -> None:
+        await _click(inter, False)
+
+    ok_btn.callback = _ok
+    no_btn.callback = _no
+    view.add_item(ok_btn)
+    view.add_item(no_btn)
+    try:
+        sent["msg"] = await channel.send(prompt, view=view)
+        await view.wait()
+    except Exception:
+        pass
+    return result["v"]
+
+
+def _deny_hook(reason: str) -> dict:
+    """組出 PreToolUse hook 的拒絕回應（deny 會讓 CC 收到 reason、不執行該工具）。"""
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    }
+
+
+def _make_pretool_hook(state: dict):
+    """為某頻道產生 PreToolUse hook（綁定該頻道 id）。非破壞性動作回空 dict（放行、
+    不干擾自動化工作流）；破壞性指令送 Discord 確認按鈕，取消或逾時則回 deny 擋下並
+    告知 CC 停手詢問使用者。用 hook 而非 can_use_tool，因後者在 headless/SDK 下不會被觸發。"""
+    cid = state["_cid"]
+
+    async def _hook(input_data: dict, tool_use_id: Optional[str],
+                    context: object) -> dict:
+        tool_name = input_data.get("tool_name", "") if isinstance(input_data, dict) else ""
+        tool_input = input_data.get("tool_input", {}) if isinstance(input_data, dict) else {}
+        if not _needs_confirm(tool_name, tool_input):
+            return {}                                      # 非破壞性：放行，不干擾自動化工作流
+        channel = bot.get_channel(cid)
+        if channel is None:                                # 找不到頻道無從確認，為安全起見擋下
+            return _deny_hook(t("confirm_no_channel"))
+        decision = await _confirm_dangerous(channel, tool_name, tool_input)
+        if decision is True:
+            return {}
+        if decision is False:
+            return _deny_hook(t("confirm_deny_cancel"))
+        return _deny_hook(t("confirm_deny_timeout", mins=max(1, _CONFIRM_TIMEOUT_SEC // 60)))
+
+    return _hook
 
 # ── 讀 session 中繼資料 ──────────────────────────────────────────────────
 # discord bot 在每則 prompt 前加的 [名字]: 標記，用來辨識「本 bot 自己的對話」，
@@ -1365,6 +1539,9 @@ async def run_claude(
     pending_question: dict = {}
     live_text: str = ""  # 生成中累積的回應文字（給動畫即時顯示）
     last_activity = [time.time()]  # CC 最後一次有輸出的時間（閒置逾時判斷用）
+    # 本回合指令原文（去掉 [名字]: 前綴、壓成單行、去反引號、截斷），顯示在思考訊息頂部供使用者核對，
+    # 一眼確認「在跑的是自己給的指令」（防幻象指令、防檔案/網路夾帶的惡意指令）
+    _cmd_disp = _BOT_PROMPT_RE.sub("", prompt).replace("\n", " ").replace("`", "'").strip()[:100]
 
     async def on_stream(upd) -> None:
         nonlocal pending_question, tool_count
@@ -1398,14 +1575,16 @@ async def run_claude(
                 body += "\n\n" + t("generating", n=len(live_text)) + f"\n> {tail}"
             icon = _spinner[i % len(_spinner)]
             i += 1
-            # 頂部顯示目前 session + 模型/思考程度，工作時一眼掌握在哪個對話、用什麼設定
+            # 頂部第一行：本回合正在處理的指令原文，讓使用者核對「在跑的是我給的指令」
+            _cmd_line = f"📥 `{_cmd_disp}`\n" if _cmd_disp else ""
+            # 第二行顯示目前 session + 模型/思考程度，工作時一眼掌握在哪個對話、用什麼設定
             if state.get("_session_label"):
                 _m = state.get("model")
                 _ms = _m.replace("claude-", "") if _m else t("default_inline")
                 _eff = state.get("effort") or t("default_inline")
-                hdr = f"💬 `{state['_session_label']}`　🧠 `{_ms}·{_eff}`\n"
+                hdr = _cmd_line + f"💬 `{state['_session_label']}`　🧠 `{_ms}·{_eff}`\n"
             else:
-                hdr = ""
+                hdr = _cmd_line
             try:
                 await progress_msg.edit(content=f"{hdr}{icon} **{t('thinking_inline')}** `{elapsed}s`\n{body}"[:1990])
             except Exception:
@@ -1833,7 +2012,8 @@ async def _process_answer(channel: discord.TextChannel, chosen: str, state: dict
         _processing[channel.id] = False
 
 async def _send_ask_question(channel: discord.TextChannel, ask_data: dict, state: dict) -> None:
-    questions = _parse_ask_questions(ask_data)
+    # Discord 一問一答架構一次只能收一題答案，多題會被吞掉；故一次只處理第一題（防呆）
+    questions = _parse_ask_questions(ask_data)[:1]
     for q in questions:
         question_text = q.get("question", t("choose_prompt"))
         raw_options: list = q.get("options", [])
@@ -3135,6 +3315,7 @@ async def on_message(message: discord.Message):
     # Speaker ID：告知 CC 是誰在說話
     speaker = message.author.display_name
     full_prompt = f"[{speaker}]: {text}"
+    _append_user_ledger(message.channel.id, speaker, text)   # 原始訊息落地存檔，供日後查證用
 
     # Auto-compact：context 達門檻先壓縮
     await _maybe_auto_compact(message.channel, state)

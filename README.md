@@ -25,6 +25,10 @@ commands, searching the web, and more — then streams the result back to you.
   drop files into the chat for Claude to read.
 - **Interactive questions** — Claude's `AskUserQuestion` is rendered as Discord
   buttons; your click is fed back as the answer.
+- **Transparency & safety** — each turn shows the command being processed at the
+  top so you can verify it's really yours, Claude states its plan before acting,
+  dangerous actions are flagged with ⚠️, and destructive commands (delete, git
+  push, shutdown…) pop a confirm button before they run.
 - **Scheduling** — `/schedule` sets up recurring tasks (cron under the hood).
 - **Model & effort control** — switch model (Sonnet / Opus / Haiku) and thinking
   effort on the fly; automatic fallback model when the primary is overloaded.
