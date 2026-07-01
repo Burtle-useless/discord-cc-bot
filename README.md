@@ -168,6 +168,13 @@ Some features need extra packages (already listed in `requirements.txt`):
 
 If you don't want a feature, you can skip its dependency.
 
+**Removing voice entirely.** All the voice code — Whisper speech-to-text, XTTS
+text-to-speech, and the GPU helpers — lives in one standalone, optional module:
+`drive_core.py`. The main bot imports it optionally, so if you never want voice
+you can simply **delete `drive_core.py`**: the bot detects it's gone, runs
+text-only with no errors, and `/drive` just reports that drive mode isn't
+installed. Nothing else needs editing.
+
 ### Drive mode (voice reply, XTTS-v2)
 
 > ⚠️ The XTTS-v2 model is under the **Coqui Public Model License (CPML)** —
