@@ -26,5 +26,6 @@ faster-whisper>=1.2.1
 pywin32>=312
 # Semantic /search (find sessions by meaning, not just literal keywords). Without it,
 # /search transparently falls back to literal keyword matching. CPU-only, no PyTorch
-# (onnxruntime backend); first search downloads a ~120MB multilingual model once:
+# (onnxruntime backend); first search downloads the multilingual-e5-large retrieval
+# model once (~2.2GB):
 fastembed>=0.3.0
