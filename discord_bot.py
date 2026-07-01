@@ -195,11 +195,6 @@ _STRINGS: dict[str, dict[str, str]] = {
         # 權限
         "no_permission": "❌ No permission.",
         "owner_only": "❌ Only the owner can run this command.",
-        # 更新公告
-        "update_header": "🚀 **Bot updated v{ver}**",
-        "change_feat": "✨ Feature (minor)",
-        "change_fix": "🐛 Fix (patch)",
-        "change_major": "🚀 Major release",
         # 指令
         "cmd_new_desc": "Reset the conversation, start a new session",
         "new_done": "✅ Conversation reset. What would you like to do next?",
@@ -513,10 +508,6 @@ _STRINGS: dict[str, dict[str, str]] = {
         ),
         "no_permission": "❌ 無權限。",
         "owner_only": "❌ 只有主帳號能執行此指令。",
-        "update_header": "🚀 **Bot 更新 v{ver}**",
-        "change_feat": "✨ 新功能（次版本）",
-        "change_fix": "🐛 修正（修訂）",
-        "change_major": "🚀 重大改版（主版本）",
         "cmd_new_desc": "重置對話，開新 session",
         "new_done": "✅ 對話已重置，接下來要做什麼？",
         "cmd_rename_desc": "重新命名目前對話（留空＝讀內容自動生成中文標題）",
@@ -728,7 +719,6 @@ MAX_MSG        = 1900
 USAGE_CACHE_SEC = 180
 ALLOWED_CHANNEL = int(_require_env("ALLOWED_CHANNEL"))
 ALLOWED_USER    = int(_require_env("ALLOWED_USER"))
-UPDATE_CHANNEL  = int(os.environ.get("UPDATE_CHANNEL") or 0)   # 更新公告推送頻道（選填，0=停用）
 # 跨頻道協作（AI Lounge）：開啟後各頻道 session 會在 prompt 收到其他頻道的近期活動，
 # 並可用 [[COORD: ...]] 廣播。預設關閉 → 行為與未啟用時完全相同（零影響）。
 COORD_ENABLED   = (os.environ.get("COORD_ENABLED") or "").strip().lower() in ("1", "true", "yes", "on")
@@ -769,35 +759,6 @@ def context_limit_for(model: str, plan: str) -> int:
     return 200_000                                   # 規則 3：其餘標準 200K
 NOTIFY_AFTER_SEC = 60                        # 任務耗時超過此秒數，完成時 @使用者推播
 INACTIVITY_TIMEOUT = 600                      # CC 連續無任何輸出超過此秒數才視為卡死（不限總時長，長工作流不會被誤殺）
-
-# ── 版本與更新內容 ──────────────────────────────────────────────────────
-BOT_VERSION = "1.21.0"
-CHANGE_TYPE = "feat"
-CHANGELOG = """\
-• Drive-mode voice reply now uses F5-TTS instead of XTTS-v2 — much better Chinese, and a far simpler install (no FFmpeg/torchcodec, no license env var)
-• The reference voice comes from f5-tts's own bundled sample, so no audio ships in this repo; the English UI uses the English sample, the Chinese UI the Chinese one
-• tmp/ no longer piles up: voice-input clips are deleted right after transcription, and files older than 24h are swept on startup
-"""
-
-_CHANGE_TYPE_LABEL = {
-    "feat":  t("change_feat"),
-    "fix":   t("change_fix"),
-    "major": t("change_major"),
-}
-
-_VERSION_FILE = Path(__file__).parent / "last_version.json"
-
-def _get_last_version() -> Optional[str]:
-    try:
-        return json.loads(_VERSION_FILE.read_text()).get("version")
-    except Exception:
-        return None
-
-def _save_last_version(v: str) -> None:
-    try:
-        _VERSION_FILE.write_text(json.dumps({"version": v}))
-    except Exception:
-        pass
 
 # 資料檔案放在 bot/ 同目錄下
 _BOT_DIR        = Path(__file__).parent
@@ -2348,19 +2309,6 @@ async def on_ready():
     # 啟動時把 bot 狀態設成上次的 session 標題
     sid = get_state(ALLOWED_CHANNEL).get("session_id")
     await _update_presence(ALLOWED_CHANNEL, await asyncio.to_thread(_session_label, sid))
-    # 版本變更 → 推送更新公告（未設定 UPDATE_CHANNEL 時跳過）
-    if UPDATE_CHANNEL and _get_last_version() != BOT_VERSION:
-        try:
-            ch = bot.get_channel(UPDATE_CHANNEL) or await bot.fetch_channel(UPDATE_CHANNEL)
-            if ch:
-                tag = _CHANGE_TYPE_LABEL.get(CHANGE_TYPE, "")
-                header = t("update_header", ver=BOT_VERSION)
-                if tag:
-                    header += f"　`{tag}`"
-                await ch.send(f"{header}\n\n{CHANGELOG}")
-                _save_last_version(BOT_VERSION)
-        except Exception as e:
-            print(f"[UPDATE_PUSH] failed: {e}", flush=True)
 
 @bot.event
 async def on_guild_channel_delete(channel: discord.abc.GuildChannel) -> None:

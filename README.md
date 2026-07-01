@@ -155,6 +155,22 @@ Now type a message in your bound channel — the bot should respond.
 
 ---
 
+## Updating
+
+You cloned this repo, so updating is just a pull:
+
+```
+git pull
+```
+
+That brings in the latest code. A release only occasionally changes
+dependencies — when it does, re-run `pip install -r requirements.txt` inside your
+virtualenv (the core deps rarely move; optional extras like voice are opt-in).
+Then restart the bot. There's no auto-update, so pull whenever you want the
+latest.
+
+---
+
 ## Commands
 
 | Command | What it does |
