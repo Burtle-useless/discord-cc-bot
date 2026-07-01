@@ -739,16 +739,12 @@ NOTIFY_AFTER_SEC = 60                        # 任務耗時超過此秒數，完
 INACTIVITY_TIMEOUT = 600                      # CC 連續無任何輸出超過此秒數才視為卡死（不限總時長，長工作流不會被誤殺）
 
 # ── 版本與更新內容 ──────────────────────────────────────────────────────
-BOT_VERSION = "1.18.0"
-CHANGE_TYPE = "feat"
+BOT_VERSION = "1.18.1"
+CHANGE_TYPE = "fix"
 CHANGELOG = """\
-✨ **v1.18.0 — persistent sessions, semantic search, drive mode & more**
-• Each channel now keeps one long-lived Claude session (same process & context) — more coherent replies, no stray session-fragment files
-• /search finds conversations by meaning, not just keywords (needs fastembed; falls back to keyword search without it)
-• /handoff — hand your current progress off to another machine seamlessly
-• /drive — drive mode: voice in, voice out (local Whisper + XTTS-v2)
-• /plan — auto-applies the correct context-limit rule for your subscription plan
-• git worktree parallel work: run several branch channels for one project at once (marked 🌿 in the sidebar)
+🔧 **v1.18.1 — bug fixes**
+• AskUserQuestion: the explanation text above the buttons now shows correctly (previously only a row of buttons appeared)
+• /rename: now actually renames the Discord channel (previously it only changed the internal title)
 """
 
 _CHANGE_TYPE_LABEL = {
@@ -2353,6 +2349,11 @@ async def cmd_rename(interaction: discord.Interaction, name: Optional[str] = Non
             return
     _save_title(sid, title)
     state["_session_label"] = title
+    # 真正改到 Discord 頻道名稱（先前只改了內部標題與 presence，漏了這行）
+    try:
+        await interaction.channel.edit(name=_channel_display_name(title, bool(state.get("wt"))))
+    except Exception as e:
+        print(f"[RENAME] 改頻道名失敗：{e}", flush=True)
     await _update_presence(interaction.channel_id, title)
     await interaction.followup.send(t("renamed", title=title))
 
