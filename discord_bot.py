@@ -317,7 +317,6 @@ _STRINGS: dict[str, dict[str, str]] = {
         "addchannel_already": "ℹ️ This channel is already on the list.",
         "addchannel_done": "✅ Channel added! You can now run a task here and in another channel **at the same time**.",
         "cmd_removechannel_desc": "Remove the current channel from the allowlist (owner only)",
-        "removechannel_cant_main": "❌ Can't remove the main channel.",
         "removechannel_done": "✅ Removed this channel from the allowlist.",
         "cmd_handoff_desc": "Generate a handoff brief of this conversation to continue on another machine",
         "handoff_generating": "📝 Generating a handoff brief (using your current session model)...",
@@ -628,7 +627,6 @@ _STRINGS: dict[str, dict[str, str]] = {
         "addchannel_already": "ℹ️ 這個頻道已經在清單裡了。",
         "addchannel_done": "✅ 已把這個頻道加入！現在可以在這裡跟另一個頻道**同時各跑一個任務**。",
         "cmd_removechannel_desc": "把目前頻道移出可用清單（主帳號限定）",
-        "removechannel_cant_main": "❌ 無法移除主頻道。",
         "removechannel_done": "✅ 已把這個頻道移出可用清單。",
         "cmd_handoff_desc": "把目前對話生成交接稿，換另一台電腦接手",
         "handoff_generating": "📝 正在生成交接稿（用你目前 session 的模型）...",
@@ -717,7 +715,6 @@ CLAUDE_CLI      = os.environ.get("CLAUDE_CLI") or os.path.expandvars(r"%APPDATA%
 DEFAULT_DIR     = Path(os.environ.get("DEFAULT_DIR") or Path.home())
 MAX_MSG        = 1900
 USAGE_CACHE_SEC = 180
-ALLOWED_CHANNEL = int(_require_env("ALLOWED_CHANNEL"))
 ALLOWED_USER    = int(_require_env("ALLOWED_USER"))
 # 跨頻道協作（AI Lounge）：開啟後各頻道 session 會在 prompt 收到其他頻道的近期活動，
 # 並可用 [[COORD: ...]] 廣播。預設關閉 → 行為與未啟用時完全相同（零影響）。
@@ -837,10 +834,12 @@ _drive_mode: bool = drive_core.load_drive(_DRIVE_FILE) if drive_core else False
 _CHANNELS_FILE = _BOT_DIR / "allowed_channels.json"
 
 def _load_allowed_channels() -> set[int]:
+    # 授權頻道純由 allowed_channels.json 持久化；不存在就回空集合，
+    # 開機後由 on_ready 的 _ensure_sidebar 掃描分類把既有對話頻道補回來
     try:
-        return {ALLOWED_CHANNEL} | {int(x) for x in json.loads(_CHANNELS_FILE.read_text())}
+        return {int(x) for x in json.loads(_CHANNELS_FILE.read_text())}
     except Exception:
-        return {ALLOWED_CHANNEL}
+        return set()
 
 def _save_allowed_channels(chs: set[int]) -> None:
     try:
@@ -942,11 +941,7 @@ def is_incident_active() -> Optional[str]:
 # ── Session 持久化（per-channel，兩個頻道各記各的，不互相覆蓋）──────────────
 def _load_sessions_map() -> dict:
     try:
-        d = json.loads(_SESSION_FILE.read_text(encoding="utf-8"))
-        # 相容舊格式 {"session_id": x} → 遷移到主頻道
-        if "session_id" in d:
-            return {str(ALLOWED_CHANNEL): d["session_id"]}
-        return d
+        return json.loads(_SESSION_FILE.read_text(encoding="utf-8"))
     except Exception:
         return {}
 
@@ -2302,13 +2297,9 @@ async def on_ready():
         asyncio.create_task(_bg_f5())
     # 多 session 側欄：註冊常駐按鈕 + 確保分類/入口頻道存在
     bot.add_view(NewChatView())   # 讓重啟前發出的按鈕仍可點
-    main_ch = bot.get_channel(ALLOWED_CHANNEL)
-    guild = main_ch.guild if main_ch else (bot.guilds[0] if bot.guilds else None)
+    guild = bot.guilds[0] if bot.guilds else None
     if guild:
         await _ensure_sidebar(guild)
-    # 啟動時把 bot 狀態設成上次的 session 標題
-    sid = get_state(ALLOWED_CHANNEL).get("session_id")
-    await _update_presence(ALLOWED_CHANNEL, await asyncio.to_thread(_session_label, sid))
 
 @bot.event
 async def on_guild_channel_delete(channel: discord.abc.GuildChannel) -> None:
@@ -3069,9 +3060,6 @@ async def cmd_addchannel(interaction: discord.Interaction):
 async def cmd_removechannel(interaction: discord.Interaction):
     if not await check_auth(interaction, owner_only=True): return
     cid = interaction.channel_id
-    if cid == ALLOWED_CHANNEL:
-        await interaction.response.send_message(t("removechannel_cant_main"), ephemeral=True)
-        return
     _allowed_channels.discard(cid)
     _save_allowed_channels(_allowed_channels)
     await interaction.response.send_message(t("removechannel_done"))

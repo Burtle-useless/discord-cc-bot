@@ -95,11 +95,11 @@ bridges (mostly Telegram, mostly single-session and text-only) generally don't:
 ### 2. Get the IDs you need
 
 Enable **Developer Mode** in Discord (Settings → Advanced → Developer Mode),
-then right-click to copy:
+then right-click your own name → *Copy User ID* to get your **`ALLOWED_USER`**.
 
-- **`ALLOWED_CHANNEL`** — right-click the channel the bot should listen in →
-  *Copy Channel ID*.
-- **`ALLOWED_USER`** — right-click your own name → *Copy User ID*.
+(No channel ID needed — on first launch the bot creates its own category and an
+entry channel with a **New chat** button; every conversation you open from there
+is authorized automatically.)
 
 ### 3. Install and configure
 
@@ -114,8 +114,8 @@ pip install -r requirements.txt
 copy .env.example .env
 ```
 
-Then open `.env` and fill in `DISCORD_TOKEN`, `ALLOWED_CHANNEL`, and
-`ALLOWED_USER`. The rest are optional (see comments in the file).
+Then open `.env` and fill in `DISCORD_TOKEN` and `ALLOWED_USER`. The rest are
+optional (see comments in the file).
 
 > **Model & context:** by default the bot uses standard 200K context
 > (`claude-sonnet-4-6`), which works on every plan with no usage credits. Tell
