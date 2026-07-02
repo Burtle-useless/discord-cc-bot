@@ -28,7 +28,8 @@ commands, searching the web, and more — then streams the result back to you.
 - **Transparency & safety** — each turn shows the command being processed at the
   top so you can verify it's really yours, Claude states its plan before acting,
   dangerous actions are flagged with ⚠️, and destructive commands (delete, git
-  push, shutdown…) pop a confirm button before they run.
+  push, shutdown…) can pop a confirm button before they run (off by default —
+  toggle with `/confirm` or set `CONFIRM_DANGEROUS=1`).
 - **Scheduling** — `/schedule` sets up recurring tasks (cron under the hood).
 - **Model & effort control** — switch model (Sonnet / Opus / Haiku) and thinking
   effort on the fly; automatic fallback model when the primary is overloaded.
@@ -57,10 +58,40 @@ bridges (mostly Telegram, mostly single-session and text-only) generally don't:
 - **Git worktree parallelism.** Spin off an isolated worktree per conversation so
   parallel edits don't collide, then merge back from Discord.
 - **Built for trust.** It runs with `bypassPermissions`, so every turn shows the
-  exact command it's running, states its plan before acting, and pops a confirm
-  button before destructive actions (delete, `git push`, shutdown…).
+  exact command it's running, states its plan before acting, and can pop a confirm
+  button before destructive actions (opt-in via `/confirm`; see Security model below).
 - **Runs unattended on Windows.** Silent background launcher, a tiny start/stop
   control panel, crash self-heal, rate-limit retries, and context auto-compaction.
+
+---
+
+## Security model — read this before you install
+
+Be clear about what you are deploying: **messages in your Discord channels become
+arbitrary code execution on your PC**, running as your user with
+`permission_mode=bypassPermissions` (Claude does not ask before acting).
+
+**What protects you, and from what:**
+
+- **Access control is exactly two allowlists**: your Discord user ID
+  (`ALLOWED_USER` / `/adduser`) and the bound channels. That is a *single factor*.
+  If your Discord account is compromised, your PC is compromised. Anyone you
+  `/adduser` can run code on your machine — treat it like handing over SSH keys.
+- **The destructive-command confirm button is advisory, not a sandbox.** It is a
+  regex blocklist over `Bash`/`PowerShell` commands (delete / format / `git push` /
+  shutdown…), off by default, and a determined bypass is trivial (e.g. running the
+  same action through a Python one-liner). It exists to catch *accidents and
+  hallucinated commands*, not attackers.
+- **Prompt injection is a real surface.** Files you drop into chat and web pages
+  Claude reads can carry instructions. The transparency features (the 📥 command
+  echo, plan-before-acting, ⚠️ flags) exist so *you* can catch this — you are the
+  last line of defense.
+
+**Deployment recommendations:** use a dedicated private server with no other
+members; enable 2FA on your Discord account; don't `/adduser` anyone you wouldn't
+give shell access; turn on confirmations (`/confirm on` or `CONFIRM_DANGEROUS=1`);
+run under a non-administrator Windows account; set `DEFAULT_DIR` to scope where
+work happens by default.
 
 ---
 
