@@ -135,6 +135,60 @@ def test_reply_cleanup() -> None:
     ok("MILESTONE 移除與 FILE 標記抽取")
 
 
+def test_fold_messages() -> None:
+    """回合訊息摺疊：result 優先序（歷史 bug 釘住）與 ctx tokens 加總。"""
+    from claude_agent_sdk import AssistantMessage, ResultMessage
+    from claude_agent_sdk.types import TextBlock
+
+    def rm(result, sid="sid-1", usage=None):
+        return ResultMessage(subtype="success", duration_ms=1, duration_api_ms=1,
+                             is_error=False, num_turns=1, session_id=sid,
+                             usage=usage, result=result)
+
+    def am(text):
+        return AssistantMessage(content=[TextBlock(text=text)], model="m")
+
+    # 一般情況：非空 result 就是最終回覆，蓋過文字塊
+    c, sid, ctx = d._fold_messages([am("draft"), rm("final answer", usage={"input_tokens": 7})])
+    assert c == "final answer" and sid == "sid-1" and ctx == 7
+    # 歷史 bug 釘住：AskUserQuestion 收尾的空 result 不可蓋掉「問題前的說明文字」
+    c, sid, _ = d._fold_messages([am("問題前的說明"), rm(None)])
+    assert c == "問題前的說明" and sid == "sid-1"
+    # ctx 三種 token 欄位加總
+    _, _, ctx = d._fold_messages([rm("x", usage={"input_tokens": 1,
+                                                 "cache_read_input_tokens": 2,
+                                                 "cache_creation_input_tokens": 3})])
+    assert ctx == 6
+    # 空輸入不炸
+    assert d._fold_messages([]) == ("", None, 0)
+    ok("_fold_messages result 優先序與 ctx 加總")
+
+
+def test_clean_reply() -> None:
+    """回覆清理：MILESTONE 標記與 ThinkingBlock 殘留移除。"""
+    assert d._clean_reply("a [[MILESTONE: m]] b") == "a  b"
+    assert d._clean_reply("x [ThinkingBlock(thinking=blah)] y") == "x  y"
+    assert d._clean_reply("  plain  ") == "plain"
+    ok("_clean_reply 標記清除")
+
+
+def test_channel_state() -> None:
+    """ChannelState：預設值、slots fail-loud（打錯欄位名立刻炸，不靜默）。"""
+    st = d.get_state(999_999_999)
+    try:
+        assert isinstance(st, d.ChannelState)
+        assert st.ctx_tokens == 0 and st.session_id is None and st._cid == 999_999_999
+        assert st.pending_options is None and st._sidebar is False
+        try:
+            st.no_such_field = 1
+            raise AssertionError("slots 應擋掉未知欄位的寫入")
+        except AttributeError:
+            pass
+    finally:
+        d._sessions.pop(999_999_999, None)   # 清掉測試用的暫存狀態
+    ok("ChannelState 預設值與 slots fail-loud")
+
+
 def main() -> None:
     test_classify_cc_error()
     test_context_limit_for()
@@ -142,6 +196,9 @@ def main() -> None:
     test_needs_confirm()
     test_channel_naming()
     test_reply_cleanup()
+    test_fold_messages()
+    test_clean_reply()
+    test_channel_state()
     print(f"✅ 全部通過（{passed} 項）")
 
 

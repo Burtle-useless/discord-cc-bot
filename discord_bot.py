@@ -10,6 +10,7 @@ import time
 import uuid
 import urllib.request
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -135,6 +136,25 @@ def _append_user_ledger(channel_id: int, author: str, text: str) -> None:
     except Exception:
         pass
 
+@dataclass(slots=True)
+class ChannelState:
+    """一個頻道的會話狀態（原為 stringly-typed dict、欄位散落全檔）。
+
+    slots=True：欄位名打錯（讀或寫）都立刻 AttributeError（fail-loud），
+    不再像 dict 靜默回 None 或長出殭屍鍵（ctx_warned 事件的根因）。
+    底線開頭為執行期旗標，不進 _persist_session 的持久化內容。"""
+    _cid: int                                    # 所屬頻道 id
+    cwd: Path                                    # 工作目錄
+    session_id: Optional[str] = None             # CC session id（None＝尚未開始）
+    model: Optional[str] = None                  # 指定模型（None＝帳號預設）
+    effort: Optional[str] = None                 # 思考程度（None＝預設）
+    wt: Optional[dict] = None                    # worktree 資訊（path/branch/base/repo/prev_cwd）
+    ctx_tokens: int = 0                          # 最近一次 result 回報的 context 用量
+    pending_options: Optional[list[str]] = None  # AskUserQuestion 待答選項（數字回覆對應用）
+    _session_label: Optional[str] = None         # 顯示用標題快取
+    _sidebar: bool = False                       # 是否為側欄對話頻道（記憶體旗標）
+    _named: bool = False                         # 側欄頻道是否已完成命名（防重複自動改名）
+
 # ── 允許使用者持久化 ────────────────────────────────────────────────────
 def _load_allowed_users() -> set[int]:
     try:
@@ -174,9 +194,9 @@ def _save_plan(plan: str) -> None:
 
 _account_plan: str = _load_plan()
 
-def _ctx_limit(state: dict) -> int:
+def _ctx_limit(state: ChannelState) -> int:
     """該 session 目前的 context 上限：依其模型（未設則用 DEFAULT_MODEL）＋帳號方案。"""
-    return context_limit_for(state.get("model") or DEFAULT_MODEL, _account_plan)
+    return context_limit_for(state.model or DEFAULT_MODEL, _account_plan)
 
 # ── 開車模式持久化（語音輸入↔語音回覆的總開關）──────────────────────────────
 # 開車時 /drive on 載入 Whisper+XTTS、啟用「語音進→語音出」；在家 /drive off 全部卸載、
@@ -302,25 +322,25 @@ def _load_sessions_map() -> dict:
     except Exception:
         return {}
 
-def _persist_session(state: dict) -> None:
-    cid = state.get("_cid")
+def _persist_session(state: ChannelState) -> None:
+    cid = state._cid
     if cid is None:
         return
     try:
         data = _load_sessions_map()
         # 整包存：session_id + model/effort/cwd，重啟後設定不會變回預設
         data[str(cid)] = {
-            "session_id": state.get("session_id"),
-            "model": state.get("model"),
-            "effort": state.get("effort"),
-            "cwd": str(state.get("cwd") or DEFAULT_DIR),
-            "wt": state.get("wt"),   # worktree 模式資訊（None 表示未啟用）
+            "session_id": state.session_id,
+            "model": state.model,
+            "effort": state.effort,
+            "cwd": str(state.cwd or DEFAULT_DIR),
+            "wt": state.wt,   # worktree 模式資訊（None 表示未啟用）
         }
         _SESSION_FILE.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     except Exception:
         pass
 
-_sessions: dict[int, dict] = {}
+_sessions: dict[int, ChannelState] = {}
 
 _processing: dict[int, bool] = {}
 _running_tasks: dict[int, "asyncio.Task"] = {}
@@ -343,7 +363,7 @@ _MILESTONE_RE = re.compile(r'\[\[MILESTONE:\s*(.+?)\]\]')
 async def _run_tracked(
     channel_id: int,
     prompt: str,
-    state: dict,
+    state: ChannelState,
     progress_msg: Optional[discord.Message],
 ) -> tuple[str, Optional[str], Optional[dict]]:
     """把 run_claude 包成可取消的 task，登記到 _running_tasks 供 /stop 使用。"""
@@ -392,7 +412,7 @@ async def _run_tracked(
 # ── 每個 channel 的 session 狀態 ──────────────────────────────────────
 _usage_cache: dict = {}
 
-def get_state(cid: int) -> dict:
+def get_state(cid: int) -> ChannelState:
     if cid not in _sessions:
         rec = _load_sessions_map().get(str(cid))
         if isinstance(rec, str):      # 舊格式：值只是 session_id 字串
@@ -406,27 +426,27 @@ def get_state(cid: int) -> dict:
             if prev and Path(prev).is_dir():
                 cwd = Path(prev)
             wt_rec = None
-        _sessions[cid] = {
-            "session_id": rec.get("session_id"),
-            "cwd": cwd if cwd.is_dir() else DEFAULT_DIR,
-            "model": rec.get("model") or DEFAULT_MODEL,
-            "effort": rec.get("effort"),
-            "wt": wt_rec if isinstance(wt_rec, dict) else None,
-            "_cid": cid,
-        }
+        _sessions[cid] = ChannelState(
+            _cid=cid,
+            cwd=cwd if cwd.is_dir() else DEFAULT_DIR,
+            session_id=rec.get("session_id"),
+            model=rec.get("model") or DEFAULT_MODEL,
+            effort=rec.get("effort"),
+            wt=wt_rec if isinstance(wt_rec, dict) else None,
+        )
     return _sessions[cid]
 
 # ── 長駐 client（A'）輔助函式 ───────────────────────────────────────────
-def _build_options(state: dict) -> ClaudeAgentOptions:
+def _build_options(state: ChannelState) -> ClaudeAgentOptions:
     """依頻道狀態組出 ClaudeAgentOptions（建立長駐 client 時用一次）。"""
     # cwd 防護：切換歷史 session 可能帶入不存在的目錄（WinError 267），退回預設目錄
-    if not Path(state["cwd"]).is_dir():
-        state["cwd"] = DEFAULT_DIR
+    if not Path(state.cwd).is_dir():
+        state.cwd = DEFAULT_DIR
     options = ClaudeAgentOptions(
-        cwd=str(state["cwd"]),
+        cwd=str(state.cwd),
         cli_path=CLAUDE_CLI,
-        model=state.get("model"),
-        effort=state.get("effort"),
+        model=state.model,
+        effort=state.effort,
         # 維持全放行（自動執行，不干擾工作流）。危險指令確認改掛 PreToolUse hook：
         # 實測 headless/SDK 下 can_use_tool 回呼不會被觸發，但 PreToolUse hook 即使在
         # bypassPermissions 也照樣觸發、且 permissionDecision="deny" 能真正擋下工具。
@@ -461,17 +481,17 @@ async def _drop_client(cid: int) -> None:
             pass
 
 
-def _client_sig(state: dict) -> tuple:
+def _client_sig(state: ChannelState) -> tuple:
     """長駐 client 的設定指紋（不含 session_id：sid 會在正常對話中由 client 自己產出）。
     cwd／model／effort／開車模式／協作模式任一改變，即代表要用新設定重建 client。"""
-    return (str(state.get("cwd")), state.get("model"), state.get("effort"),
+    return (str(state.cwd), state.model, state.effort,
             _drive_mode, COORD_ENABLED)
 
 
-async def _acquire_client(state: dict) -> "ClaudeSDKClient":
+async def _acquire_client(state: ChannelState) -> "ClaudeSDKClient":
     """取得該頻道的長駐 client；無、或設定指紋已變，則（丟棄後）新建並連線。
     首次連線才帶 resume 接回舊 session；之後同一 client 多輪都在同進程同 session。"""
-    cid = state["_cid"]
+    cid = state._cid
     c = _clients.get(cid)
     if c is not None and _client_sigs.get(cid) == _client_sig(state):
         _client_used[cid] = time.time()
@@ -479,8 +499,8 @@ async def _acquire_client(state: dict) -> "ClaudeSDKClient":
     if c is not None:                 # 設定已變 → 丟棄舊 client，用新設定重建
         await _drop_client(cid)
     options = _build_options(state)
-    if state.get("session_id"):
-        options.resume = state["session_id"]   # 僅首次連線需要接回
+    if state.session_id:
+        options.resume = state.session_id   # 僅首次連線需要接回
     c = ClaudeSDKClient(options)
     await c.connect()
     _clients[cid] = c
@@ -626,11 +646,11 @@ def _deny_hook(reason: str) -> dict:
     }
 
 
-def _make_pretool_hook(state: dict):
+def _make_pretool_hook(state: ChannelState):
     """為某頻道產生 PreToolUse hook（綁定該頻道 id）。非破壞性動作回空 dict（放行、
     不干擾自動化工作流）；破壞性指令送 Discord 確認按鈕，取消或逾時則回 deny 擋下並
     告知 CC 停手詢問使用者。用 hook 而非 can_use_tool，因後者在 headless/SDK 下不會被觸發。"""
-    cid = state["_cid"]
+    cid = state._cid
 
     async def _hook(input_data: dict, tool_use_id: Optional[str],
                     context: object) -> dict:
@@ -850,9 +870,35 @@ def _session_label(session_id: Optional[str]) -> str:
     return t("chat_n", id=session_id[:8])
 
 # ── Claude 執行 ────────────────────────────────────────────────────────
+def _fold_messages(messages: list) -> tuple[str, Optional[str], int]:
+    """把一回合收到的 SDK 訊息摺疊成 (回覆文字, session_id, ctx_tokens)。
+    純函式、無副作用，供單元測試以假訊息流驗證。
+    關鍵行為：空 result 不可蓋掉前面文字塊已累積的內容——AskUserQuestion 收尾的
+    result 是空的，蓋掉會讓「問題前的說明文字」消失（歷史真 bug，勿回歸）。"""
+    content, new_sid, ctx = "", None, 0
+    for m in messages:
+        if isinstance(m, ResultMessage):
+            if m.result:
+                content = m.result
+            new_sid = m.session_id or new_sid
+            usage = getattr(m, "usage", None) or {}
+            ctx = (usage.get("input_tokens", 0)
+                   + usage.get("cache_read_input_tokens", 0)
+                   + usage.get("cache_creation_input_tokens", 0)) or ctx
+        elif isinstance(m, AssistantMessage) and not content:
+            for block in m.content:
+                if hasattr(block, "text"):
+                    content += block.text
+    return content, new_sid, ctx
+
+def _clean_reply(content: str) -> str:
+    """清除回覆中的 [[MILESTONE:...]] 標記與 ThinkingBlock 殘留。純函式。"""
+    content = _MILESTONE_RE.sub("", content)
+    return re.sub(r'\[ThinkingBlock\(thinking=.*?\)\]', '', content, flags=re.DOTALL).strip()
+
 async def run_claude(
     prompt: str,
-    state: dict,
+    state: ChannelState,
     progress_msg: Optional[discord.Message] = None,
 ) -> tuple[str, Optional[str], Optional[dict]]:
     """回傳 (content, new_session_id, ask_question_data)"""
@@ -901,11 +947,11 @@ async def run_claude(
             # 頂部第一行：本回合正在處理的指令原文，讓使用者核對「在跑的是我給的指令」
             _cmd_line = f"📥 `{_cmd_disp}`\n" if _cmd_disp else ""
             # 第二行顯示目前 session + 模型/思考程度，工作時一眼掌握在哪個對話、用什麼設定
-            if state.get("_session_label"):
-                _m = state.get("model")
+            if state._session_label:
+                _m = state.model
                 _ms = _m.replace("claude-", "") if _m else t("default_inline")
-                _eff = state.get("effort") or t("default_inline")
-                hdr = _cmd_line + f"💬 `{state['_session_label']}`　🧠 `{_ms}·{_eff}`\n"
+                _eff = state.effort or t("default_inline")
+                hdr = _cmd_line + f"💬 `{state._session_label}`　🧠 `{_ms}·{_eff}`\n"
             else:
                 hdr = _cmd_line
             try:
@@ -932,7 +978,7 @@ async def run_claude(
                     continue
                 messages.append(message)
                 if isinstance(message, ResultMessage):
-                    _client_used[state["_cid"]] = time.time()  # 標記活躍；client 留池不關
+                    _client_used[state._cid] = time.time()  # 標記活躍；client 留池不關
                     break
                 if isinstance(message, AssistantMessage):
                     content = getattr(message, "content", [])
@@ -949,7 +995,7 @@ async def run_claude(
                     if text_parts: await on_stream(_U(type="assistant", content="\n".join(text_parts), tool_calls=None))
         except Exception:
             # 長駐 client 可能已損壞（連線斷／進程死）→ 丟棄，下次重建並 resume 接回
-            await _drop_client(state["_cid"])
+            await _drop_client(state._cid)
             raise
 
     anim_task = asyncio.create_task(_animate()) if progress_msg else None
@@ -971,34 +1017,16 @@ async def run_claude(
                 pass
             # 被取消＝逾時或 /stop 中斷：client 卡在半途，丟棄以免下次接到半截回應
             try:
-                await _drop_client(state["_cid"])
+                await _drop_client(state._cid)
             except BaseException:
                 pass
         if anim_task:
             anim_task.cancel()
 
-    content, new_sid = "", None
-    for m in messages:
-        if isinstance(m, ResultMessage):
-            # 只在 result 非空時才採用：AskUserQuestion 收尾的空 result 不可蓋掉
-            # 前面文字塊已累積的「問題前說明文字」（否則思考結果會消失）
-            if m.result:
-                content = m.result
-            new_sid = m.session_id or new_sid
-            usage = getattr(m, "usage", None) or {}
-            ctx = (usage.get("input_tokens", 0)
-                   + usage.get("cache_read_input_tokens", 0)
-                   + usage.get("cache_creation_input_tokens", 0))
-            if ctx:
-                state["ctx_tokens"] = ctx
-        elif isinstance(m, AssistantMessage) and not content:
-            for block in m.content:
-                if hasattr(block, "text"): content += block.text
-
-    # 清除 [[MILESTONE:...]] 標記、ThinkingBlock 殘留
-    content = _MILESTONE_RE.sub("", content)
-    content = re.sub(r'\[ThinkingBlock\(thinking=.*?\)\]', '', content, flags=re.DOTALL).strip()
-    return content or _NO_RESPONSE, new_sid, pending_question or None
+    content, new_sid, ctx = _fold_messages(messages)
+    if ctx:
+        state.ctx_tokens = ctx
+    return _clean_reply(content) or _NO_RESPONSE, new_sid, pending_question or None
 
 # ── [[FILE:路徑]] 標記並上傳檔案 ─────────────────────────────────────────
 _FILE_MARKER = re.compile(r"\[\[FILE:\s*(.+?)\s*\]\]")
@@ -1068,9 +1096,9 @@ async def _convert_pptx(src: Path) -> Optional[Path]:
     except Exception:
         return None
 
-async def _maybe_auto_compact(channel: discord.TextChannel, state: dict) -> None:
+async def _maybe_auto_compact(channel: discord.TextChannel, state: ChannelState) -> None:
     """context 達到門檻時自動執行 /compact，避免 CONTEXT_FULL。"""
-    if state.get("ctx_tokens", 0) < int(_ctx_limit(state) * 0.85):
+    if state.ctx_tokens < int(_ctx_limit(state) * 0.85):
         return
     msg = await channel.send(t("compacting"))
     try:
@@ -1079,9 +1107,9 @@ async def _maybe_auto_compact(channel: discord.TextChannel, state: dict) -> None
             state,
         )
         if compact_sid:
-            state["session_id"] = compact_sid
+            state.session_id = compact_sid
             _persist_session(state)
-        state["ctx_tokens"] = 0
+        state.ctx_tokens = 0
         await msg.edit(content=t("compacted"))
         await asyncio.sleep(1.5)
         await msg.delete()
@@ -1183,13 +1211,13 @@ def _parse_ask_questions(ask_data: dict) -> list[dict]:
         return ask_data["questions"]
     return [ask_data]
 
-async def _handle_cc_error(prog: discord.Message, err: "CCError", state: dict) -> None:
+async def _handle_cc_error(prog: discord.Message, err: "CCError", state: ChannelState) -> None:
     msg = err.user_msg
     if err.kind in _RESET_SESSION:
-        state["session_id"] = None
-        state["ctx_tokens"] = 0
+        state.session_id = None
+        state.ctx_tokens = 0
         _persist_session(state)
-        await _drop_client(state.get("_cid"))   # session 已失效，關掉長駐 client（A'）
+        await _drop_client(state._cid)   # session 已失效，關掉長駐 client（A'）
         msg += t("session_auto_cleared")
     if err.kind == "OVERLOADED":
         inc = await asyncio.to_thread(is_incident_active)
@@ -1203,7 +1231,7 @@ async def _handle_cc_error(prog: discord.Message, err: "CCError", state: dict) -
     except Exception:
         pass
 
-async def _process_answer(channel: discord.TextChannel, chosen: str, state: dict) -> None:
+async def _process_answer(channel: discord.TextChannel, chosen: str, state: ChannelState) -> None:
     if _processing.get(channel.id):
         await channel.send(t("still_processing"), delete_after=5)
         return
@@ -1212,7 +1240,7 @@ async def _process_answer(channel: discord.TextChannel, chosen: str, state: dict
     try:
         reply, new_sid, next_ask = await _run_tracked(channel.id, chosen, state, prog)
         if new_sid:
-            state["session_id"] = new_sid
+            state.session_id = new_sid
             _persist_session(state)
         await prog.delete()
         # 按鈕回答並非語音輸入，不合成語音；但仍過 _voice_reply 清掉可能殘留的朗讀標記
@@ -1234,7 +1262,7 @@ async def _process_answer(channel: discord.TextChannel, chosen: str, state: dict
     finally:
         _processing[channel.id] = False
 
-async def _send_ask_question(channel: discord.TextChannel, ask_data: dict, state: dict) -> None:
+async def _send_ask_question(channel: discord.TextChannel, ask_data: dict, state: ChannelState) -> None:
     # Discord 一問一答架構一次只能收一題答案，多題會被吞掉；故一次只處理第一題（防呆）
     questions = _parse_ask_questions(ask_data)[:1]
     for q in questions:
@@ -1264,7 +1292,7 @@ async def _send_ask_question(channel: discord.TextChannel, ask_data: dict, state
         numbered = "\n".join(_lines)
         body = f"❓ **{question_text}**\n{numbered}\n" + t("ask_hint")
 
-        state["pending_options"] = opt_labels
+        state.pending_options = opt_labels
 
         view = discord.ui.View(timeout=600)
         answered = {"done": False}
@@ -1284,7 +1312,7 @@ async def _send_ask_question(channel: discord.TextChannel, ask_data: dict, state
                     pass
                 return
             answered["done"] = True
-            state.pop("pending_options", None)
+            state.pending_options = None
             for item in view.children:
                 item.disabled = True
             view.stop()
@@ -1410,7 +1438,7 @@ async def _schedule_loop() -> None:
                     try:
                         reply, new_sid, _ = await run_claude(s["task"], state)
                         if new_sid:
-                            state["session_id"] = new_sid
+                            state.session_id = new_sid
                             _persist_session(state)
                         if reply and reply != _NO_RESPONSE:
                             await send_long(channel, reply)
@@ -1496,12 +1524,12 @@ async def _open_sidebar_channel(guild: discord.Guild, category: discord.Category
         print(f"[SIDEBAR] 建頻道失敗：{e}", flush=True)
         return None
     st = get_state(ch.id)
-    st["session_id"] = session_id
-    st["cwd"] = Path(cwd) if cwd and Path(cwd).is_dir() else DEFAULT_DIR
-    st["_sidebar"] = True
-    st["_named"] = bool(title)   # 救回已有標題的不用再自動改名；全新對話留待第一句後改名
+    st.session_id = session_id
+    st.cwd = Path(cwd) if cwd and Path(cwd).is_dir() else DEFAULT_DIR
+    st._sidebar = True
+    st._named = bool(title)   # 救回已有標題的不用再自動改名；全新對話留待第一句後改名
     if title:
-        st["_session_label"] = title
+        st._session_label = title
         if session_id:
             _save_title(session_id, title)   # 標題寫進快取，/sessions 顯示一致
     _allowed_channels.add(ch.id)
@@ -1527,9 +1555,9 @@ async def _restore_session_to_channel(inter: discord.Interaction, entry: dict) -
             return
     # 退回舊行為：切換目前頻道
     state = get_state(inter.channel_id)
-    state["session_id"] = entry["session_id"]
-    state["cwd"] = cwd
-    state["_session_label"] = title
+    state.session_id = entry["session_id"]
+    state.cwd = cwd
+    state._session_label = title
     _persist_session(state)
     await _drop_client(inter.channel_id)   # 換到別段歷史對話，舊 client 須丟棄重接（A'）
     await _update_presence(inter.channel_id, title)
@@ -1577,15 +1605,15 @@ async def _bump_channel_to_top(channel: discord.TextChannel) -> None:
     except Exception as e:
         print(f"[SIDEBAR] 置頂失敗：{e}", flush=True)
 
-async def _autoname_channel(channel: discord.TextChannel, state: dict) -> None:
+async def _autoname_channel(channel: discord.TextChannel, state: ChannelState) -> None:
     """側欄頻道第一句後：讀內容生成中文標題、改頻道名（受 2 次/10 分鐘改名限制，故只改一次）。"""
     try:
-        title = await _generate_title(state["session_id"])
+        title = await _generate_title(state.session_id)
         if not title:
             return
-        _save_title(state["session_id"], title)
-        state["_session_label"] = title
-        await channel.edit(name=_channel_display_name(title, bool(state.get("wt"))))
+        _save_title(state.session_id, title)
+        state._session_label = title
+        await channel.edit(name=_channel_display_name(title, bool(state.wt)))
         await _update_presence(channel.id, title)
     except Exception as e:
         print(f"[SIDEBAR] 自動改名失敗：{e}", flush=True)
@@ -1608,8 +1636,8 @@ async def _ensure_sidebar(guild: discord.Guild) -> None:
                 # 旗標只存在記憶體、不寫檔，bot 重啟就消失；在此替既有側欄頻道補回，
                 # 讓重啟前就存在的舊頻道也能繼續自動置頂
                 st = get_state(ch.id)
-                st["_sidebar"] = True
-                st["_named"] = True   # 既有頻道已有名字，標記為已命名以免重啟後被自動改名
+                st._sidebar = True
+                st._named = True   # 既有頻道已有名字，標記為已命名以免重啟後被自動改名
         # 入口頻道不存在就建，並固定在最上面
         if entry is None:
             entry = await guild.create_text_channel(SIDEBAR_ENTRY, category=category, position=0)
@@ -1688,7 +1716,7 @@ async def on_guild_channel_delete(channel: discord.abc.GuildChannel) -> None:
     wt_rec = None
     st = _sessions.get(channel.id)
     if st:
-        wt_rec = st.get("wt")
+        wt_rec = st.wt
     else:
         rec = _load_sessions_map().get(str(channel.id))
         if isinstance(rec, dict):
@@ -1719,8 +1747,8 @@ async def on_guild_channel_create(channel: discord.abc.GuildChannel) -> None:
             or channel.id in _allowed_channels):
         return
     st = get_state(channel.id)
-    st["_sidebar"] = True
-    st["_named"] = True   # 手動建的由使用者自己命名，不自動改名
+    st._sidebar = True
+    st._named = True   # 手動建的由使用者自己命名，不自動改名
     _allowed_channels.add(channel.id)
 
 # ── Slash 指令 ─────────────────────────────────────────────────────────
@@ -1729,9 +1757,9 @@ async def on_guild_channel_create(channel: discord.abc.GuildChannel) -> None:
 async def cmd_new(interaction: discord.Interaction) -> None:
     if not await check_auth(interaction): return
     st = get_state(interaction.channel_id)
-    st["session_id"] = None
-    st["ctx_tokens"] = 0
-    st["_session_label"] = t("new_chat")
+    st.session_id = None
+    st.ctx_tokens = 0
+    st._session_label = t("new_chat")
     _persist_session(st)
     await _drop_client(interaction.channel_id)   # 開新對話，丟棄舊 client 從頭起一個（A'）
     await _update_presence(interaction.channel_id, t("new_chat"))
@@ -1741,7 +1769,7 @@ async def cmd_new(interaction: discord.Interaction) -> None:
 async def cmd_rename(interaction: discord.Interaction, name: Optional[str] = None) -> None:
     if not await check_auth(interaction): return
     state = get_state(interaction.channel_id)
-    sid = state.get("session_id")
+    sid = state.session_id
     if not sid:
         await interaction.response.send_message(t("rename_no_session"), ephemeral=True)
         return
@@ -1754,10 +1782,10 @@ async def cmd_rename(interaction: discord.Interaction, name: Optional[str] = Non
             await interaction.followup.send(t("rename_gen_failed"))
             return
     _save_title(sid, title)
-    state["_session_label"] = title
+    state._session_label = title
     # 真正改到 Discord 頻道名稱（先前只改了內部標題與 presence，漏了這行）
     try:
-        await interaction.channel.edit(name=_channel_display_name(title, bool(state.get("wt"))))
+        await interaction.channel.edit(name=_channel_display_name(title, bool(state.wt)))
     except Exception as e:
         print(f"[RENAME] 改頻道名失敗：{e}", flush=True)
     await _update_presence(interaction.channel_id, title)
@@ -1777,8 +1805,8 @@ async def cmd_stop(interaction: discord.Interaction) -> None:
 async def cmd_continue(interaction: discord.Interaction) -> None:
     if not await check_auth(interaction): return
     state = get_state(interaction.channel_id)
-    if state.get("session_id"):
-        await interaction.response.send_message(t("continue_resume", id=state['session_id'][:8]))
+    if state.session_id:
+        await interaction.response.send_message(t("continue_resume", id=state.session_id[:8]))
     else:
         await interaction.response.send_message(t("continue_none"))
 
@@ -1786,22 +1814,22 @@ async def cmd_continue(interaction: discord.Interaction) -> None:
 async def cmd_status(interaction: discord.Interaction) -> None:
     if not await check_auth(interaction): return
     state = get_state(interaction.channel_id)
-    sid = state["session_id"]
+    sid = state.session_id
     label = await asyncio.to_thread(_session_label, sid)
-    ctx = state.get("ctx_tokens", 0)
+    ctx = state.ctx_tokens
     ctx_limit = _ctx_limit(state)
     ctx_bar = _bar(ctx / ctx_limit * 100)
     lines = [
         t("status_title"),
         t("status_convo", label=label),
-        t("status_dir", cwd=state['cwd']),
+        t("status_dir", cwd=state.cwd),
     ]
-    if state.get("wt"):
-        lines.append(t("status_worktree", branch=state["wt"]["branch"], base=state["wt"]["base"]))
+    if state.wt:
+        lines.append(t("status_worktree", branch=state.wt["branch"], base=state.wt["base"]))
     lines += [
         t("status_session", id=sid[:8]) if sid else t("status_session_none"),
-        t("status_model", model=state['model'] or t("default_inline"), fb=FALLBACK_MODEL),
-        t("status_effort", effort=state['effort'] or t("default_inline")),
+        t("status_model", model=state.model or t("default_inline"), fb=FALLBACK_MODEL),
+        t("status_effort", effort=state.effort or t("default_inline")),
         t("status_context", bar=ctx_bar, ctx=f"{ctx:,}", limit=f"{ctx_limit:,}"),
     ]
     await interaction.response.send_message("\n".join(lines))
@@ -2109,7 +2137,7 @@ async def cmd_confirm(interaction: discord.Interaction, switch: str) -> None:
 async def cmd_model(interaction: discord.Interaction, model: str) -> None:
     if not await check_auth(interaction): return
     st = get_state(interaction.channel_id)
-    st["model"] = None if model == "default" else model
+    st.model = None if model == "default" else model
     _persist_session(st)   # 立刻存檔，重啟後仍記得
     await interaction.response.send_message(t("model_set", model=model))
 
@@ -2125,7 +2153,7 @@ async def cmd_model(interaction: discord.Interaction, model: str) -> None:
 async def cmd_effort(interaction: discord.Interaction, effort: str) -> None:
     if not await check_auth(interaction): return
     st = get_state(interaction.channel_id)
-    st["effort"] = None if effort == "default" else effort
+    st.effort = None if effort == "default" else effort
     _persist_session(st)   # 立刻存檔，重啟後仍記得
     await interaction.response.send_message(t("effort_set", effort=effort))
 
@@ -2189,7 +2217,7 @@ async def cmd_cd(interaction: discord.Interaction, path: str) -> None:
         await interaction.response.send_message(t("cd_not_found", path=path))
         return
     st = get_state(interaction.channel_id)
-    st["cwd"] = p
+    st.cwd = p
     _persist_session(st)   # 立刻存檔，重啟後仍記得
     await interaction.response.send_message(t("cd_done", p=p))
 
@@ -2197,10 +2225,10 @@ async def cmd_cd(interaction: discord.Interaction, path: str) -> None:
 async def cmd_pwd(interaction: discord.Interaction) -> None:
     if not await check_auth(interaction): return
     state = get_state(interaction.channel_id)
-    cwd = state["cwd"]
-    if state.get("wt"):
+    cwd = state.cwd
+    if state.wt:
         await interaction.response.send_message(
-            t("pwd_with_wt", cwd=cwd, branch=state["wt"]["branch"]))
+            t("pwd_with_wt", cwd=cwd, branch=state.wt["branch"]))
     else:
         await interaction.response.send_message(f"📂 `{cwd}`")
 
@@ -2226,7 +2254,7 @@ async def cmd_worktree(interaction: discord.Interaction, action: str,
     if not await check_auth(interaction): return
     await interaction.response.defer()
     state = get_state(interaction.channel_id)
-    cwd = state["cwd"]
+    cwd = state.cwd
 
     if action == "list":
         items = await asyncio.to_thread(wt_core.list_worktrees, cwd)
@@ -2241,8 +2269,8 @@ async def cmd_worktree(interaction: discord.Interaction, action: str,
         return
 
     if action == "on":
-        if state.get("wt"):
-            w = state["wt"]
+        if state.wt:
+            w = state.wt
             await interaction.followup.send(
                 t("wt_already_on", branch=w["branch"], path=w["path"]))
             return
@@ -2251,23 +2279,23 @@ async def cmd_worktree(interaction: discord.Interaction, action: str,
         if not res.ok:
             await interaction.followup.send(_wt_error_text(res.error))
             return
-        state["wt"] = {
+        state.wt = {
             "path": str(res.path),
             "branch": res.branch,
             "base": res.base,
             "repo": str(res.repo),
             "prev_cwd": str(cwd),   # off 時還原到啟用前的目錄
         }
-        state["cwd"] = res.path
+        state.cwd = res.path
         _persist_session(state)
         await interaction.followup.send(
             t("wt_on_done", branch=res.branch, base=res.base, path=res.path))
-        if state.get("_sidebar"):
+        if state._sidebar:
             await _rename_for_wt(interaction.channel, True)
         return
 
     if action == "merge":
-        w = state.get("wt")
+        w = state.wt
         if not w:
             await interaction.followup.send(t("wt_not_on"))
             return
@@ -2293,18 +2321,18 @@ async def cmd_worktree(interaction: discord.Interaction, action: str,
             return
         # 合併成功 → worktree 與分支已清理，還原 cwd、清掉 wt、持久化
         prev = Path(w.get("prev_cwd") or w["repo"])
-        state["cwd"] = prev if prev.is_dir() else DEFAULT_DIR
-        state.pop("wt", None)
+        state.cwd = prev if prev.is_dir() else DEFAULT_DIR
+        state.wt = None
         _persist_session(state)
         await interaction.followup.send(
             t("wt_merge_done", branch=w["branch"], base=w["base"],
-              cwd=state["cwd"]))
-        if state.get("_sidebar"):
+              cwd=state.cwd))
+        if state._sidebar:
             await _rename_for_wt(interaction.channel, False)
         return
 
     # action == "off"
-    w = state.get("wt")
+    w = state.wt
     if not w:
         await interaction.followup.send(t("wt_not_on"))
         return
@@ -2314,12 +2342,12 @@ async def cmd_worktree(interaction: discord.Interaction, action: str,
         await interaction.followup.send(t("wt_off_dirty", err=res.error[:300]))
         return
     prev = Path(w.get("prev_cwd") or w["repo"])
-    state["cwd"] = prev if prev.is_dir() else DEFAULT_DIR
-    state.pop("wt", None)
+    state.cwd = prev if prev.is_dir() else DEFAULT_DIR
+    state.wt = None
     _persist_session(state)
     await interaction.followup.send(
-        t("wt_off_done", branch=w["branch"], cwd=state["cwd"]))
-    if state.get("_sidebar"):
+        t("wt_off_done", branch=w["branch"], cwd=state.cwd))
+    if state._sidebar:
         await _rename_for_wt(interaction.channel, False)
 
 @bot.tree.command(name="screenshot", description=t("cmd_screenshot_desc"))
@@ -2372,13 +2400,13 @@ async def cmd_usage(interaction: discord.Interaction) -> None:
 async def cmd_handoff(interaction: discord.Interaction) -> None:
     if not await check_auth(interaction): return
     state = get_state(interaction.channel_id)
-    sid = state.get("session_id")
+    sid = state.session_id
     if not sid:
         await interaction.response.send_message(t("handoff_empty"), ephemeral=True)
         return
     await interaction.response.defer()
     await interaction.followup.send(t("handoff_generating"))
-    doc = await _generate_handoff(sid, state.get("model"))
+    doc = await _generate_handoff(sid, state.model)
     if not doc:
         await interaction.followup.send(t("handoff_empty"))
         return
@@ -2392,9 +2420,8 @@ async def cmd_schedule(interaction: discord.Interaction, task: str) -> None:
     parse_prompt = t("schedule_parse_prompt", task=task)
     # 一次性解析：用 interaction.id 當合成頻道 id（不會與任何 channel_id 撞號），
     # 讓它自建臨時 client、不碰頻道的長駐 client；解析完在 finally 丟棄（A'）
-    tmp_state: dict = {"session_id": None, "cwd": DEFAULT_DIR,
-                       "model": "claude-haiku-4-5-20251001", "effort": None,
-                       "_cid": interaction.id}
+    tmp_state = ChannelState(_cid=interaction.id, cwd=DEFAULT_DIR,
+                             model="claude-haiku-4-5-20251001")
     try:
         result, _, _ = await run_claude(parse_prompt, tmp_state)
         json_match = re.search(r'\{.*\}', result, re.DOTALL)
@@ -2524,12 +2551,12 @@ async def on_message(message: discord.Message) -> None:
     text = re.sub(r"<@!?\d+>", "", message.content).strip()
 
     # 若有待答選項，使用者打數字 → 對應到選項文字
-    pending = state.get("pending_options")
+    pending = state.pending_options
     if pending and text.isdigit():
         idx = int(text) - 1
         if 0 <= idx < len(pending):
             chosen = pending[idx]
-            state.pop("pending_options", None)
+            state.pending_options = None
             await _process_answer(message.channel, chosen, state)
             return
 
@@ -2598,7 +2625,7 @@ async def on_message(message: discord.Message) -> None:
         _processing[message.channel.id] = False
         return
 
-    state.pop("pending_options", None)
+    state.pending_options = None
 
     # Speaker ID：告知 CC 是誰在說話
     speaker = message.author.display_name
@@ -2609,7 +2636,7 @@ async def on_message(message: discord.Message) -> None:
     await _maybe_auto_compact(message.channel, state)
 
     # 目前 session 標題，顯示在思考中訊息頂部，工作時一眼知道在哪個對話
-    state["_session_label"] = await asyncio.to_thread(_session_label, state.get("session_id"))
+    state._session_label = await asyncio.to_thread(_session_label, state.session_id)
 
     progress_msg = await message.channel.send(t("thinking"))
     t0 = time.time()
@@ -2618,11 +2645,11 @@ async def on_message(message: discord.Message) -> None:
             message.channel.id, full_prompt, state, progress_msg
         )
         if new_sid:
-            state["session_id"] = new_sid
+            state.session_id = new_sid
             _persist_session(state)
             # 更新標題與 bot 狀態（新對話此時才有 session 檔可讀標題）
-            state["_session_label"] = await asyncio.to_thread(_session_label, new_sid)
-            await _update_presence(message.channel.id, state["_session_label"])
+            state._session_label = await asyncio.to_thread(_session_label, new_sid)
+            await _update_presence(message.channel.id, state._session_label)
         await progress_msg.delete()
         if ask_data:
             # 先送出「問題前的說明文字（思考結果）」，再送問題按鈕；
@@ -2641,11 +2668,11 @@ async def on_message(message: discord.Message) -> None:
             tip = t("notify_need_answer") if ask_data else t("notify_done")
             await message.channel.send(f"{message.author.mention} ✅ {tip} · {elapsed:.0f}s")
         # 側欄頻道：第一句處理完 → 讀內容生成中文標題、改頻道名（只改一次）
-        if state.get("_sidebar") and not state.get("_named") and state.get("session_id"):
-            state["_named"] = True
+        if state._sidebar and not state._named and state.session_id:
+            state._named = True
             asyncio.create_task(_autoname_channel(message.channel, state))
         # 側欄頻道：最新有活動 → 移到入口下方置頂（已在頂端不動）
-        elif state.get("_sidebar"):
+        elif state._sidebar:
             asyncio.create_task(_bump_channel_to_top(message.channel))
     except _StoppedByUser:
         await progress_msg.edit(content=t("stopped"))
