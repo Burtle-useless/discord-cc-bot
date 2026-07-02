@@ -129,17 +129,20 @@ def get_f5tts():
     return _f5_model
 
 
-def synthesize(text: str, out_path: str, ref_lang: str = "en") -> str:
+def synthesize(text: str, out_path: str, ref_lang: str = "en",
+               ref_file: str | None = None, ref_text: str | None = None) -> str:
     """把文字合成成語音檔（阻塞式，呼叫端用 asyncio.to_thread 包起來）。回傳檔案路徑。
-    ref_lang 由呼叫端依介面語系決定（zh/en），選對應的內建參考音（本模組不依賴主程式的 i18n）。"""
+    ref_lang 由呼叫端依介面語系決定（zh/en），選對應的內建參考音（本模組不依賴主程式的 i18n）。
+    ref_file/ref_text 成對提供時改用自訂參考音（固定回覆音色），未提供則用套件內建範例。"""
     model = get_f5tts()
-    ref_audio, ref_text = _f5_ref(ref_lang)
-    # F5-TTS 零樣本克隆：用套件自帶參考音 + 逐字稿，生成語言由 text 內容自動判定。
-    # F5 內部會 print 參考／生成逐字稿；中文範例是簡體，Windows 主控台若為 cp950 會
+    if not (ref_file and ref_text):
+        ref_file, ref_text = _f5_ref(ref_lang)
+    # F5-TTS 零樣本克隆：用參考音 + 逐字稿，生成語言由 text 內容自動判定。
+    # F5 內部會 print 參考／生成逐字稿；中文逐字稿在 Windows cp950 主控台會
     # UnicodeEncodeError 炸掉合成，故把 infer 期間的 stdout 導到記憶體隔離掉。
     with contextlib.redirect_stdout(io.StringIO()):
         model.infer(
-            ref_file=ref_audio,
+            ref_file=ref_file,
             ref_text=ref_text,
             gen_text=text,
             file_wave=out_path,

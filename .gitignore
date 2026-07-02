@@ -23,3 +23,7 @@ __pycache__/
 
 # Temp
 tmp/
+
+# Semantic /search vector cache (generated at runtime, can be tens of MB)
+session_vectors.json
+session_vectors_e5.json
