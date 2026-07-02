@@ -1,0 +1,26 @@
+# 每次 push / PR 跑全部測試（純 assert 腳本，不依賴測試框架）
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # test_bot_logic 會 import 主模組，需要這兩個核心相依；
+      # 語音/排程等選配套件都是延遲匯入，不用裝
+      - name: Install core dependencies
+        run: pip install "discord.py>=2.7.1" "claude-agent-sdk>=0.1.81"
+      - name: Run tests
+        run: |
+          python test_i18n.py
+          python test_bot_logic.py
+          python test_coord_core.py
+          python test_wt_core.py
