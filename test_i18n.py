@@ -54,6 +54,13 @@ def main() -> None:
     assert "abc" in i18n.t("renamed", title="abc")
     ok("帶參數字串可正常 format")
 
+    # 5. /guide 說明書每頁必須塞進 Discord 2000 字上限（留安全餘裕）
+    for lang in ("en", "zh-TW"):
+        for key, val in i18n._STRINGS[lang].items():
+            if key.startswith("guide_"):
+                assert len(val) < 1900, f"{lang}/{key} 太長（{len(val)} 字）"
+    ok("guide 頁面長度低於 Discord 上限")
+
     print(f"✅ 全部通過（{passed} 項）")
 
 

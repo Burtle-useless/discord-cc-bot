@@ -2533,6 +2533,19 @@ async def cmd_help(interaction: discord.Interaction) -> None:
     if not await check_auth(interaction): return
     await interaction.response.send_message(t("help_text"))
 
+# ── /guide 內建使用說明書 ─────────────────────────────────────────────────
+_GUIDE_KEYS = ("basics", "sessions", "model", "voice", "files", "schedule", "worktree", "safety")
+
+@bot.tree.command(name="guide", description=t("cmd_guide_desc"))
+@discord.app_commands.choices(topic=[
+    discord.app_commands.Choice(name=t(f"guide_topic_{k}"), value=k) for k in _GUIDE_KEYS
+])
+async def cmd_guide(interaction: discord.Interaction, topic: Optional[str] = None) -> None:
+    """不帶主題給總覽、帶主題給該頁白話解說；ephemeral 只有本人看得到、不洗版。"""
+    if not await check_auth(interaction): return
+    key = f"guide_{topic}" if topic in _GUIDE_KEYS else "guide_overview"
+    await interaction.response.send_message(t(key), ephemeral=True)
+
 # ── 一般訊息 → 送給 Claude ──────────────────────────────────────────────
 @bot.event
 async def on_message(message: discord.Message) -> None:

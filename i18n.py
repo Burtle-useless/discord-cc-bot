@@ -308,6 +308,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "help_text": (
             "**🤖 Claude Code Bot**\n\n"
             "Just send a message → it goes to Claude (no @ needed)\n\n"
+            "`/guide [topic]` — the user manual (start here if unsure what something does)\n"
             "`/new` — reset the conversation\n"
             "`/rename [name]` — rename the conversation (blank = auto-title from content)\n"
             "`/stop` — stop the current task immediately\n"
@@ -333,6 +334,144 @@ _STRINGS: dict[str, dict[str, str]] = {
             "`/listusers` — list users with access"
         ),
         # 一般訊息
+        # /guide 內建使用說明書（總覽 + 各主題頁；ephemeral 不洗版）
+        "cmd_guide_desc": (
+            "The built-in user manual - pick a topic for a plain-language walkthrough"
+        ),
+        "guide_topic_basics": (
+            "Basics"
+        ),
+        "guide_topic_sessions": (
+            "Conversations"
+        ),
+        "guide_topic_model": (
+            "Models & usage"
+        ),
+        "guide_topic_voice": (
+            "Voice (drive)"
+        ),
+        "guide_topic_files": (
+            "Files"
+        ),
+        "guide_topic_schedule": (
+            "Scheduling"
+        ),
+        "guide_topic_worktree": (
+            "Parallel work"
+        ),
+        "guide_topic_safety": (
+            "Safety"
+        ),
+        "guide_overview": (
+            "📖 **ClaudeCC User Guide**\n"
+            "\n"
+            "This bot turns Discord into a remote control: you type, Claude Code acts on your PC.\n"
+            "Use `/guide` with a topic for details:\n"
+            "\n"
+            "• **Basics** — starting out, reading the progress message\n"
+            "• **Conversations** — finding old chats, renaming, handoff\n"
+            "• **Models & usage** — switching models, effort, quota\n"
+            "• **Voice (drive)** — voice in, voice out, fully local\n"
+            "• **Files** — sending/receiving files, screenshots\n"
+            "• **Scheduling** — natural-language scheduled tasks\n"
+            "• **Parallel work** — one branch per channel\n"
+            "• **Safety** — access control and confirmations"
+        ),
+        "guide_basics": (
+            "📖 **Basics**\n"
+            "\n"
+            "**Talking**: just type in a conversation channel — no @ needed. Every message becomes a Claude Code turn on your PC: it can read/write files, run commands, and browse the web.\n"
+            "\n"
+            "**New conversation**: press the button in the ➕ entry channel; a new channel appears above — one channel = one independent conversation. After your first message the channel auto-renames to a fitting title.\n"
+            "\n"
+            "**Reading the progress message**:\n"
+            "• 📥 the top line echoes the command being processed — verify it's really yours\n"
+            "• 💬 the second line shows the conversation title and model in use\n"
+            "• ⚙️📖✏️ are tools being used; a leading ⚠️ means it modifies files or runs system commands — worth a glance\n"
+            "• 💭 is a thought snippet; ✍️ means the reply is being generated\n"
+            "\n"
+            "**Stop mid-task**: `/stop` halts the current job immediately.\n"
+            "**Resume**: `/continue` picks up the previous session; see `/guide Conversations` for more.\n"
+            "**Long replies** are attached as a .md file automatically."
+        ),
+        "guide_sessions": (
+            "📖 **Conversations**\n"
+            "\n"
+            "**Finding old chats**:\n"
+            "• `/sessions` — list past conversations (default: this bot's own; pick \"All on this PC\" to include the desktop app's)\n"
+            "• `/search roughly what it was about` — semantic search; describe the content, no exact keywords needed\n"
+            "Picking one restores it into a fresh channel; the original stays untouched.\n"
+            "\n"
+            "**Renaming**: `/rename new name` — or leave blank to auto-generate a title from content. The channel name and bot presence update together.\n"
+            "\n"
+            "**Handoff to another machine**: `/handoff` condenses the conversation into a brief you can paste into Claude Code elsewhere and continue seamlessly (necessary details are embedded — the other machine can't read this one's files).\n"
+            "\n"
+            "**Closing a conversation**: just delete the Discord channel. The transcript stays on disk and can be restored later via /sessions or /search."
+        ),
+        "guide_model": (
+            "📖 **Models & usage**\n"
+            "\n"
+            "**Model**: `/model` — Sonnet (daily driver), Opus (strongest, heavier on quota), Haiku (fast). Each channel remembers its own setting across restarts.\n"
+            "**Effort**: `/effort` — low to max; higher thinks deeper but slower.\n"
+            "**Plan**: `/plan` tells the bot your subscription so it applies the official 1M-context rule (automatic for Opus on Max/Team/Enterprise).\n"
+            "**Quota**: `/usage` shows 5-hour and 7-day usage bars with reset countdowns.\n"
+            "**Status**: `/status` shows conversation, directory, model, and a context usage bar at a glance.\n"
+            "\n"
+            "**When context fills up**: nothing to do — it auto-compacts near the limit and keeps going; if it truly overflows, the session resets automatically and your next message starts fresh."
+        ),
+        "guide_voice": (
+            "📖 **Voice (drive mode)**\n"
+            "\n"
+            "**What for**: work with Claude hands-free while driving or doing chores — voice in, voice out, fully local (Whisper listens, F5-TTS speaks), nothing goes to cloud STT/TTS.\n"
+            "\n"
+            "**On**: `/drive on` (loads models onto the GPU; first run downloads them)\n"
+            "**Use**: hold Discord's mic button and send a voice message → the bot shows \"🎤 Heard: …\" → you get the normal text reply plus a spoken summary as an audio file\n"
+            "**Off**: `/drive off` (unloads models, frees VRAM)\n"
+            "\n"
+            "**Notes**:\n"
+            "• The switch is global and survives restarts\n"
+            "• Speech recognition can mishear; Claude is told to infer intent from context\n"
+            "• Typed messages never trigger voice replies — only voice input does"
+        ),
+        "guide_files": (
+            "📖 **Files**\n"
+            "\n"
+            "**Sending**: drag files into the channel and Claude can read them. Images are understood visually; PowerPoint files are auto-converted to PDF for page-by-page reading.\n"
+            "**Receiving**: ask it to \"send me the X file\" and it uploads straight to the channel (25MB limit).\n"
+            "**Screen**: `/screenshot` captures the PC's current screen — handy for checking progress while away.\n"
+            "**Directories**: `/cd path` changes the working directory, `/pwd` shows it. Per-channel, remembered across restarts."
+        ),
+        "guide_schedule": (
+            "📖 **Scheduling**\n"
+            "\n"
+            "**Create**: `/schedule tidy my desktop every morning at 8` — plain language works; the bot parses it into a one-time or recurring schedule.\n"
+            "**Manage**: `/schedules` lists everything with delete buttons.\n"
+            "**Execution**: when due, the task runs in its original channel and reports back. If the channel happens to be busy, it waits for the next free slot instead of colliding."
+        ),
+        "guide_worktree": (
+            "📖 **Parallel work (git worktree)**\n"
+            "\n"
+            "**Scenario**: two conversations editing the same repo at once, without stepping on each other's files.\n"
+            "\n"
+            "**Usage**:\n"
+            "• `/worktree on` — gives this channel its own branch + separate folder; edits here are fully isolated (the channel gets a 🌿 prefix)\n"
+            "• `/worktree merge` — done: merge back into the base branch and clean up automatically\n"
+            "• `/worktree off` — stop without merging (the branch is kept; no work is lost)\n"
+            "• `/worktree list` — see what exists\n"
+            "\n"
+            "**Safety gates**: with uncommitted changes, merge/off are refused — your work is never silently dropped; merge conflicts abort cleanly and list the conflicting files."
+        ),
+        "guide_safety": (
+            "📖 **Safety**\n"
+            "\n"
+            "**Understand the nature first**: messages here = actions on your PC. Access control is two allowlists:\n"
+            "• `/adduser` / `/removeuser` / `/listusers` — who may use the bot (granting access = letting them operate your PC; be deliberate)\n"
+            "• `/addchannel` / `/removechannel` — which channels work (multiple channels can run tasks in parallel)\n"
+            "\n"
+            "**Dangerous-action confirmation**: with `/confirm on`, destructive commands (delete, format, git push, shutdown…) pop a button for your approval first, auto-cancelling on timeout. Off by default. It guards against slips — it is not a sandbox.\n"
+            "\n"
+            "**Transparency works for you**: the 📥 command echo guards against \"it's running something else\"; ⚠️ makes file edits and system commands visible at a glance; plans are stated before acting. Anything looks off — `/stop` any time."
+        ),
         "busy_prev": "⏳ Still handling the previous message, please try again shortly.",
         "heard": "🎤 Heard: {heard}",
         "voice_hint": "(The following was transcribed from voice input and may contain homophones or misrecognized words; please infer my intended meaning from context before responding): {heard}",
@@ -632,6 +771,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "help_text": (
             "**🤖 Claude Code Bot**\n\n"
             "直接傳訊息 → 送給 Claude（不需要 @）\n\n"
+            "`/guide [主題]` — 使用說明書（不知道某功能怎麼用就看這）\n"
             "`/new` — 重置對話\n"
             "`/rename [名稱]` — 重新命名對話（留空＝讀內容自動生成中文標題）\n"
             "`/stop` — 立即停止目前工作\n"
@@ -655,6 +795,144 @@ _STRINGS: dict[str, dict[str, str]] = {
             "`/adduser @user` — 新增使用權限（主帳號限定）\n"
             "`/removeuser @user` — 移除使用權限（主帳號限定）\n"
             "`/listusers` — 列出有權限的使用者"
+        ),
+        # /guide 內建使用說明書（總覽 + 各主題頁；ephemeral 不洗版）
+        "cmd_guide_desc": (
+            "內建使用說明書——挑個主題看白話解說"
+        ),
+        "guide_topic_basics": (
+            "入門"
+        ),
+        "guide_topic_sessions": (
+            "對話管理"
+        ),
+        "guide_topic_model": (
+            "模型與用量"
+        ),
+        "guide_topic_voice": (
+            "語音（開車）"
+        ),
+        "guide_topic_files": (
+            "檔案"
+        ),
+        "guide_topic_schedule": (
+            "排程"
+        ),
+        "guide_topic_worktree": (
+            "平行作業"
+        ),
+        "guide_topic_safety": (
+            "安全"
+        ),
+        "guide_overview": (
+            "📖 **ClaudeCC 使用說明書**\n"
+            "\n"
+            "這隻 bot 把 Discord 變成遙控器：你打字，電腦上的 Claude Code 動手。\n"
+            "用 `/guide` 加主題看詳細說明：\n"
+            "\n"
+            "• **入門** — 怎麼開始對話、看懂進度訊息\n"
+            "• **對話管理** — 找回舊對話、命名、換電腦接手\n"
+            "• **模型與用量** — 換模型、思考程度、額度查詢\n"
+            "• **語音（開車）** — 語音進、語音出，全程本機\n"
+            "• **檔案** — 傳檔給 Claude、拿檔案回來、截圖\n"
+            "• **排程** — 用自然語言排定時任務\n"
+            "• **平行作業** — 一個頻道一條分支，互不踩腳\n"
+            "• **安全** — 權限控管與危險動作確認"
+        ),
+        "guide_basics": (
+            "📖 **入門**\n"
+            "\n"
+            "**開始對話**：直接在對話頻道打字就行，不用 @。每一句話都會交給電腦上的 Claude Code 處理，它能讀寫檔案、跑指令、上網查資料。\n"
+            "\n"
+            "**開新對話**：到「➕新對話」入口頻道按按鈕，上面會多一個新頻道——一個頻道就是一段獨立對話，互不干擾。第一句話之後頻道會自動改成貼切的標題。\n"
+            "\n"
+            "**看懂「思考中」訊息**：\n"
+            "• 📥 頂部那行是「正在處理的指令原文」，可核對它跑的是不是你說的話\n"
+            "• 💬 第二行是目前對話標題與使用的模型\n"
+            "• ⚙️📖✏️ 是它正在用的工具；⚠️ 開頭代表會改檔案或跑系統指令，多看一眼\n"
+            "• 💭 是它的想法片段；✍️ 是回覆生成中\n"
+            "\n"
+            "**中途想停**：`/stop` 立即中止目前工作。\n"
+            "**接續舊話**：`/continue` 恢復上一段 session；更多見 `/guide 對話管理`。\n"
+            "**訊息太長**：超長回覆會自動存成 .md 檔附上，手機也好讀。"
+        ),
+        "guide_sessions": (
+            "📖 **對話管理**\n"
+            "\n"
+            "**找回舊對話**：\n"
+            "• `/sessions` — 列出過往對話（預設只列 bot 自己的；選「電腦上全部」連桌面版的也列）\n"
+            "• `/search 大概意思` — 語意搜尋，不用記精準關鍵字，描述內容就找得到\n"
+            "選中後會「救回成一個新頻道」，原頻道不受影響。\n"
+            "\n"
+            "**命名**：`/rename 新名字` 改標題；留空會讀內容自動生成。頻道名稱、bot 狀態列會一起更新。\n"
+            "\n"
+            "**換台電腦接手**：`/handoff` 會把這段對話濃縮成一份交接稿，貼到另一台電腦的 Claude Code 就能無縫接續（對方讀不到這台的檔案，必要細節已寫進交接稿）。\n"
+            "\n"
+            "**關掉對話**：直接刪 Discord 頻道即可。對話紀錄還在硬碟上，之後仍能用 /sessions 或 /search 救回。"
+        ),
+        "guide_model": (
+            "📖 **模型與用量**\n"
+            "\n"
+            "**換模型**：`/model` — Sonnet（日常推薦）、Opus（最強、較吃額度）、Haiku（快）。每個頻道記各自的設定，重啟不會忘。\n"
+            "**思考程度**：`/effort` — low 到 max，越高想得越深、也越慢。\n"
+            "**訂閱方案**：`/plan` 告訴 bot 你的方案，它會按官方規則決定 Opus 有沒有 1M context（Max／Team／Enterprise 自動有）。\n"
+            "**額度**：`/usage` 看 5 小時與 7 天用量條、重置倒數。\n"
+            "**目前狀態**：`/status` 一次看對話、目錄、模型、context 用量條。\n"
+            "\n"
+            "**context 滿了怎辦**：不用管——接近上限會自動壓縮再繼續；真的爆了會自動清 session，下一句話開新對話。"
+        ),
+        "guide_voice": (
+            "📖 **語音（開車模式）**\n"
+            "\n"
+            "**用途**：開車或做家事時，用嘴巴跟電腦上的 Claude 工作——語音進、語音出，全程本機處理（Whisper 聽、F5-TTS 說），不經雲端。\n"
+            "\n"
+            "**開**：`/drive on`（載入模型吃 GPU／VRAM，首次會下載）\n"
+            "**用**：按住 Discord 的麥克風傳語音訊息 → bot 顯示「🎤 聽到：…」→ 文字回覆照常，另附一段口語摘要的語音檔\n"
+            "**關**：`/drive off`（卸載模型、釋放 VRAM）\n"
+            "\n"
+            "**提醒**：\n"
+            "• 開關是全域的，重啟會記得上次狀態\n"
+            "• 語音辨識偶有同音字，已提示 Claude 依上下文推斷原意\n"
+            "• 打字訊息不會觸發語音回覆，只有語音輸入會"
+        ),
+        "guide_files": (
+            "📖 **檔案**\n"
+            "\n"
+            "**給檔案**：直接把檔案拖進頻道，Claude 就能讀。圖片看得懂內容；PowerPoint 會自動轉成 PDF 讓它逐頁讀。\n"
+            "**拿檔案**：跟它說「把 XX 檔傳給我」，它會直接上傳到頻道（上限 25MB）。\n"
+            "**看螢幕**：`/screenshot` 截取電腦目前畫面傳上來，出門在外看進度很方便。\n"
+            "**切目錄**：`/cd 路徑` 換工作目錄、`/pwd` 看現在在哪。每個頻道記各自的目錄。"
+        ),
+        "guide_schedule": (
+            "📖 **排程**\n"
+            "\n"
+            "**建立**：`/schedule 每天早上八點幫我整理桌面` — 用自然語言描述就行，bot 會解析成排程（一次性或週期性都可以）。\n"
+            "**管理**：`/schedules` 列出全部排程、按按鈕刪除。\n"
+            "**執行**：時間到了會在原頻道跑，結果直接回報。若當時頻道正忙，會自動順延到空檔再跑，不會打架。"
+        ),
+        "guide_worktree": (
+            "📖 **平行作業（git worktree）**\n"
+            "\n"
+            "**情境**：想同時開兩個對話改同一個 repo，又怕互相踩到檔案。\n"
+            "\n"
+            "**用法**：\n"
+            "• `/worktree on` — 給這個頻道一條專屬分支＋獨立資料夾，這裡的改動完全隔離（頻道名會多 🌿）\n"
+            "• `/worktree merge` — 做完了：合併回主分支並自動清理\n"
+            "• `/worktree off` — 不合併、先收工（分支保留，工作不會不見）\n"
+            "• `/worktree list` — 看目前有哪些\n"
+            "\n"
+            "**安全閘**：有未提交的變更時 merge／off 都會被擋下，絕不默默丟掉你的工作；合併衝突會中止並列出衝突檔案。"
+        ),
+        "guide_safety": (
+            "📖 **安全**\n"
+            "\n"
+            "**先懂本質**：這裡的訊息＝在你電腦上執行動作。權限控管是兩張白名單：\n"
+            "• `/adduser`／`/removeuser`／`/listusers` — 誰可以用（給別人＝給他操作你電腦的能力，慎重）\n"
+            "• `/addchannel`／`/removechannel` — 哪些頻道可以用（多頻道可並行跑工作）\n"
+            "\n"
+            "**危險動作確認**：`/confirm on` 開啟後，偵測到破壞性指令（刪除、格式化、git push、關機…）會先跳按鈕請你放行，逾時自動取消。預設是關的。它防的是手滑，不是沙箱。\n"
+            "\n"
+            "**透明化在幫你**：📥 指令核對防「它在跑別的東西」；⚠️ 讓改檔和系統指令一眼可見；動手前先講計畫。看到不對勁隨時 `/stop`。"
         ),
         "busy_prev": "⏳ 還在處理上一則訊息，請稍後再試。",
         "heard": "🎤 聽到：{heard}",

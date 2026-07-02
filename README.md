@@ -211,6 +211,7 @@ latest.
 | `/rename` | Rename the current conversation (blank = auto-title) |
 | `/sessions` | List past conversations and restore one |
 | `/search` | Search past conversations by meaning (semantic; needs `fastembed`, else keyword) |
+| `/guide` | Built-in user manual — pick a topic, get a plain-language walkthrough |
 | `/stop` | Stop the currently running task |
 | `/status` | Show current status |
 | `/model` | Pick the Claude model |
