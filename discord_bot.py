@@ -1082,7 +1082,6 @@ async def _maybe_auto_compact(channel: discord.TextChannel, state: dict) -> None
             state["session_id"] = compact_sid
             _persist_session(state)
         state["ctx_tokens"] = 0
-        state["ctx_warned"] = False
         await msg.edit(content=t("compacted"))
         await asyncio.sleep(1.5)
         await msg.delete()
@@ -1189,7 +1188,6 @@ async def _handle_cc_error(prog: discord.Message, err: "CCError", state: dict) -
     if err.kind in _RESET_SESSION:
         state["session_id"] = None
         state["ctx_tokens"] = 0
-        state["ctx_warned"] = False
         _persist_session(state)
         await _drop_client(state.get("_cid"))   # session 已失效，關掉長駐 client（A'）
         msg += t("session_auto_cleared")
@@ -1398,10 +1396,16 @@ async def _schedule_loop() -> None:
                     continue
                 if now < next_run:
                     continue
-                # 到期 → 執行
+                # 到期 → 執行。頻道正在處理訊息時整輪跳過（不更新 next_run、30 秒後再試），
+                # 執行期間也佔住 _processing——避免兩個 run_claude 同時打進同一個長駐
+                # client 造成串流交錯，也讓使用者訊息收到「處理中」提示而非默默排隊
                 channel = bot.get_channel(s["channel_id"])
                 if channel:
-                    state = get_state(s["channel_id"])
+                    cid = s["channel_id"]
+                    if _processing.get(cid):
+                        continue
+                    _processing[cid] = True
+                    state = get_state(cid)
                     await channel.send(t("run_schedule", task=s['task']))
                     try:
                         reply, new_sid, _ = await run_claude(s["task"], state)
@@ -1412,6 +1416,8 @@ async def _schedule_loop() -> None:
                             await send_long(channel, reply)
                     except Exception as e:
                         await channel.send(t("schedule_run_failed", e=e))
+                    finally:
+                        _processing[cid] = False
                 # 計算下次執行時間
                 cron_expr = s.get("cron", "").strip()
                 if _HAS_CRONITER and cron_expr:
@@ -1725,7 +1731,6 @@ async def cmd_new(interaction: discord.Interaction) -> None:
     st = get_state(interaction.channel_id)
     st["session_id"] = None
     st["ctx_tokens"] = 0
-    st["ctx_warned"] = False
     st["_session_label"] = t("new_chat")
     _persist_session(st)
     await _drop_client(interaction.channel_id)   # 開新對話，丟棄舊 client 從頭起一個（A'）
