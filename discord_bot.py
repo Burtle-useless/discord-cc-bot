@@ -1565,6 +1565,19 @@ async def _restore_session_to_channel(inter: discord.Interaction, entry: dict) -
     cwd, ok = _resolve_project_dir(entry["project_path"])
     category = bot.get_channel(_sidebar_category_id) if _sidebar_category_id else None
     if inter.guild and isinstance(category, discord.CategoryChannel):
+        # 任一分類的既有頻道若已綁著這個 session，直接導航過去，不再重複開一個。
+        # 掃持久化的 session map（頻道 id→session_id，跨所有分類；不受 _allowed_channels
+        # 重啟後只補回「CC 對話」分類所限），命中且頻道還在就導向它。
+        sid = entry["session_id"]
+        if sid:
+            for _cid_s, _rec in _load_sessions_map().items():
+                _rsid = _rec if isinstance(_rec, str) else (_rec or {}).get("session_id")
+                if _rsid == sid and _cid_s.isdigit():
+                    existing = bot.get_channel(int(_cid_s))
+                    if existing is not None:
+                        await inter.response.edit_message(
+                            content=t("already_open", mention=existing.mention), view=None)
+                        return
         ch = await _open_sidebar_channel(inter.guild, category,
                                          session_id=entry["session_id"], title=title, cwd=str(cwd))
         if ch:
