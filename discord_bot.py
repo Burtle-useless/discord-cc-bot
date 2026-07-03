@@ -1669,6 +1669,18 @@ async def _ensure_sidebar(guild: discord.Guild) -> None:
                 st = get_state(ch.id)
                 st._sidebar = True
                 st._named = True   # 既有頻道已有名字，標記為已命名以免重啟後被自動改名
+        # 使用者可能把對話頻道搬到別的分類自行歸類；那些頻道不在上面的「CC 對話」
+        # 分類裡，重啟後不會被上面的迴圈補回 _allowed_channels，會被訊息閘門判為
+        # 非授權而不回應。這裡用持久化的 session map（跨分類的頻道↔session 綁定）把
+        # 仍存在於本 guild 的頻道補回，只恢復「可回應」，不設 _sidebar（不動使用者
+        # 已歸好的分類與位置，也不自動置頂／改名）。
+        for _cid_s in _load_sessions_map():
+            if not _cid_s.isdigit():
+                continue
+            _cid = int(_cid_s)
+            if _cid not in _allowed_channels and isinstance(
+                    guild.get_channel(_cid), discord.TextChannel):
+                _allowed_channels.add(_cid)
         # 入口頻道不存在就建，並固定在最上面
         if entry is None:
             entry = await guild.create_text_channel(SIDEBAR_ENTRY, category=category, position=0)
