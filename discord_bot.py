@@ -430,7 +430,10 @@ def get_state(cid: int) -> ChannelState:
             _cid=cid,
             cwd=cwd if cwd.is_dir() else DEFAULT_DIR,
             session_id=rec.get("session_id"),
-            model=rec.get("model") or DEFAULT_MODEL,
+            # model 欄位存在（含明確的 None＝使用者選過「帳號預設」）就照存的用；
+            # 只有全新頻道／舊格式紀錄（無此欄位）才給 DEFAULT_MODEL——
+            # 否則 /model 選「預設」後一重啟就被悄悄改回 DEFAULT_MODEL，前後行為不一致
+            model=rec.get("model") if "model" in rec else DEFAULT_MODEL,
             effort=rec.get("effort"),
             wt=wt_rec if isinstance(wt_rec, dict) else None,
         )
@@ -1347,11 +1350,21 @@ async def _send_ask_question(channel: discord.TextChannel, ask_data: dict, state
 
         view = discord.ui.View(timeout=600)
         answered = {"done": False}
+        sent: dict = {"msg": None}
 
         async def on_to(v: discord.ui.View = view) -> None:
+            # 逾時：把按鈕真的置灰——要 edit 訊息才會反映到 Discord 畫面，
+            # 只改記憶體的話使用者仍看到可點的按鈕、點了卻顯示互動失敗。
+            # 打數字作答的路徑不受影響，逾時後仍可用文字回答。
             for item in v.children:
                 item.disabled = True
             answered["done"] = True
+            m = sent.get("msg")
+            if m is not None:
+                try:
+                    await m.edit(view=v)
+                except Exception:
+                    pass
 
         view.on_timeout = on_to
 
@@ -1394,7 +1407,7 @@ async def _send_ask_question(channel: discord.TextChannel, ask_data: dict, state
                     await _finish(inter, opt_labels[idx])
                 sel.callback = sel_cb
                 view.add_item(sel)
-            await channel.send(body, view=view)
+            sent["msg"] = await channel.send(body, view=view)
         except Exception:
             await channel.send(body)
 
@@ -2661,7 +2674,8 @@ async def on_message(message: discord.Message) -> None:
         voice_texts: list[str] = []
         voice_blocked = False  # 開車模式關閉時收到語音 → 標記，迴圈後提示
         for att in message.attachments:
-            dest = tmp_dir / att.filename
+            # 檔名加短隨機前綴：不同訊息／頻道同時上傳同名檔案時不互相覆蓋（tmp 為共用目錄）
+            dest = tmp_dir / f"{uuid.uuid4().hex[:6]}_{att.filename}"
             # 語音訊息 → 本機 STT 轉文字（CC 讀不了音訊），不當檔案路徑給 CC
             if (att.content_type or "").startswith("audio/"):
                 if not _drive_mode or drive_core is None:
