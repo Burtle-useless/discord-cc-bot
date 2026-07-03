@@ -682,10 +682,11 @@ def _make_pretool_hook(state: ChannelState):
 _BOT_PROMPT_RE = re.compile(r'^\[.+?\]:\s')
 
 def _session_meta(jf: Path, full: bool = False) -> dict:
-    """讀 session jsonl，回傳 {is_bot, title, first_prompt, cwd}。
+    """讀 session jsonl，回傳 {is_bot, title, first_prompt, cwd, has_body}。
     full=False（預設）：非 bot session 讀到第一句就提前結束以省時（給「我的對話」用）。
-    full=True：讀完整檔以取得標題（給「電腦上全部」用，非 bot session 標題在後面）。"""
-    title, first_prompt, cwd, is_bot = "", "", "", False
+    full=True：讀完整檔以取得標題（給「電腦上全部」用，非 bot session 標題在後面）。
+    has_body：檔內有無真正對話（user/assistant record）；只有 aiTitle 的空殼為 False。"""
+    title, first_prompt, cwd, is_bot, has_body = "", "", "", False, False
     try:
         with jf.open("r", encoding="utf-8", errors="replace") as f:
             for line in f:
@@ -697,6 +698,8 @@ def _session_meta(jf: Path, full: bool = False) -> dict:
                     except Exception:
                         pass
                     continue
+                if not has_body and ('"type":"user"' in line or '"type":"assistant"' in line):
+                    has_body = True   # 出現真正對話內容，非空殼
                 if '"type":"user"' in line and not first_prompt:
                     try:
                         o = json.loads(line)
@@ -718,7 +721,7 @@ def _session_meta(jf: Path, full: bool = False) -> dict:
                         break  # 非 bot session 且非完整模式，不用再往下讀
     except Exception:
         pass
-    return {"is_bot": is_bot, "title": title, "first_prompt": first_prompt, "cwd": cwd}
+    return {"is_bot": is_bot, "title": title, "first_prompt": first_prompt, "cwd": cwd, "has_body": has_body}
 
 # ── 中文標題快取（讀內容生成、可手動重命名）────────────────────────────────
 _titles_cache: dict = {"mtime": None, "data": {}}
@@ -851,6 +854,8 @@ def _list_sessions(scope: str = "mine", limit: int = 15) -> list[dict]:
             meta = _session_meta(jf, full=full)
             if scope == "mine" and not meta["is_bot"]:
                 continue
+            if scope == "all" and not meta["has_body"]:
+                continue  # all 模式：略過只有標題、無對話本體的空殼 session
             entries.append({
                 "session_id": jf.stem,
                 "project_path": meta["cwd"] or str(DEFAULT_DIR),
