@@ -189,6 +189,35 @@ def test_channel_state() -> None:
     ok("ChannelState 預設值與 slots fail-loud")
 
 
+def test_purge_title_shell() -> None:
+    """用完即焚：meta 查詢殘留的空殼（只有 aiTitle、無對話本體）要刪掉，
+    有 user/assistant 本體的真實對話一定要留住，None／不存在的 id 不可炸。"""
+    import uuid
+    proj = d.Path.home() / ".claude" / "projects" / "C--Users-hower"
+    proj.mkdir(parents=True, exist_ok=True)
+    shell_sid = f"test-shell-{uuid.uuid4()}"
+    body_sid = f"test-body-{uuid.uuid4()}"
+    shell_f = proj / f"{shell_sid}.jsonl"
+    body_f = proj / f"{body_sid}.jsonl"
+    try:
+        # 空殼：只有一行 aiTitle，無對話本體
+        shell_f.write_text('{"type":"ai-title","aiTitle":"測試標題"}\n', encoding="utf-8")
+        # 真實對話：含 user 本體（多一行 user record）
+        body_f.write_text('{"type":"ai-title","aiTitle":"測試標題"}\n'
+                          '{"type":"user","message":{"content":"hi"}}\n', encoding="utf-8")
+        d._purge_title_shell(shell_sid)
+        assert not shell_f.exists(), "空殼應被刪除"
+        d._purge_title_shell(body_sid)
+        assert body_f.exists(), "有對話本體的真實 session 絕不可被刪"
+        # 邊界：None 與不存在的 id 都不可炸
+        d._purge_title_shell(None)
+        d._purge_title_shell(f"nonexistent-{uuid.uuid4()}")
+    finally:
+        shell_f.unlink(missing_ok=True)
+        body_f.unlink(missing_ok=True)
+    ok("_purge_title_shell 空殼刪除/本體保留/邊界")
+
+
 def main() -> None:
     test_classify_cc_error()
     test_context_limit_for()
@@ -199,6 +228,7 @@ def main() -> None:
     test_fold_messages()
     test_clean_reply()
     test_channel_state()
+    test_purge_title_shell()
     print(f"✅ 全部通過（{passed} 項）")
 
 

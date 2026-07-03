@@ -799,6 +799,23 @@ async def _iter_messages(client: "ClaudeSDKClient") -> AsyncIterator:
         except MessageParseError:
             continue
 
+def _purge_title_shell(meta_sid: Optional[str]) -> None:
+    """清掉 meta 查詢（_ask_haiku）殘留的空殼 session 檔。
+    _ask_haiku 已設 no-session-persistence 抑制對話本體，但 CLI 內建 auto-title
+    偶爾會搶在行程結束前寫入一行 aiTitle，留下只有標題、無對話本體的空殼（約 105 bytes）。
+    這裡只針對「這次 meta 查詢自己的 session id」、且經 _session_meta 確認無對話本體
+    （has_body 為 False）才刪；真實對話一定有 user/assistant 本體，絕不會被誤刪。"""
+    if not meta_sid:
+        return
+    claude_home = Path.home() / ".claude" / "projects"
+    for jf in claude_home.glob(f"*/{meta_sid}.jsonl"):
+        try:
+            if not _session_meta(jf)["has_body"]:
+                jf.unlink()
+        except OSError:
+            pass
+        break
+
 async def _ask_haiku(prompt: str, model: Optional[str] = "claude-haiku-4-5-20251001") -> str:
     """一次性、不留 session 檔的輕量呼叫。
     預設用 Haiku（生成標題用）；交接稿改傳當前 session 模型以品質優先。
@@ -811,12 +828,15 @@ async def _ask_haiku(prompt: str, model: Optional[str] = "claude-haiku-4-5-20251
         extra_args={"no-session-persistence": None},  # 不寫 session 檔，避免污染
     )
     out = ""
+    meta_sid: Optional[str] = None
     async with ClaudeSDKClient(opts) as c:
         await c.query(prompt)
         async for msg in _iter_messages(c):
             if isinstance(msg, ResultMessage):
                 out = msg.result or ""
+                meta_sid = msg.session_id
                 break
+    _purge_title_shell(meta_sid)   # no-session-persistence 偶爾仍被 CLI auto-title 搶寫成空殼，用完即焚
     return out.strip()
 
 async def _generate_title(session_id: str) -> Optional[str]:
