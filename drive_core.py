@@ -21,6 +21,7 @@ import io
 import json
 import os
 import re
+import threading
 from pathlib import Path
 
 # CC 回覆裡的朗讀版標記：<<<SPEAK>>> ... <<<ENDSPEAK>>>
@@ -56,21 +57,23 @@ def free_vram() -> None:
 
 # ── 語音轉文字（faster-whisper，本機 GPU，開車用）────────────────────────
 _whisper_model = None  # 單例，只載入一次
+_whisper_lock = threading.Lock()  # 載入鎖：啟動預載與首次轉錄併發時，避免模型重複載入兩份吃爆 VRAM
 
 
 def get_whisper():
     """延遲載入 Whisper 模型（單例）；首次會下載 large-v3 並載入 GPU。GPU 起不來自動退 CPU。"""
     global _whisper_model
-    if _whisper_model is None:
-        add_cuda_dll_path()
-        from faster_whisper import WhisperModel
-        try:
-            # 8GB VRAM 跑 large-v3 float16 綽綽有餘
-            _whisper_model = WhisperModel("large-v3", device="cuda", compute_type="float16")
-            print("[WHISPER] large-v3 已載入 GPU", flush=True)
-        except Exception as e:
-            print(f"[WHISPER] GPU 失敗，改用 CPU：{e}", flush=True)
-            _whisper_model = WhisperModel("large-v3", device="cpu", compute_type="int8")
+    with _whisper_lock:
+        if _whisper_model is None:
+            add_cuda_dll_path()
+            from faster_whisper import WhisperModel
+            try:
+                # 8GB VRAM 跑 large-v3 float16 綽綽有餘
+                _whisper_model = WhisperModel("large-v3", device="cuda", compute_type="float16")
+                print("[WHISPER] large-v3 已載入 GPU", flush=True)
+            except Exception as e:
+                print(f"[WHISPER] GPU 失敗，改用 CPU：{e}", flush=True)
+                _whisper_model = WhisperModel("large-v3", device="cpu", compute_type="int8")
     return _whisper_model
 
 
@@ -86,15 +89,17 @@ def transcribe(path: str, initial_prompt: str = "") -> str:
 def unload_whisper() -> None:
     """卸載 Whisper 模型、釋放顯存（開車模式關閉時呼叫）。"""
     global _whisper_model
-    if _whisper_model is not None:
-        _whisper_model = None
-        free_vram()
+    with _whisper_lock:
+        if _whisper_model is not None:
+            _whisper_model = None
+            free_vram()
 
 
 # ── 文字轉語音（F5-TTS，本機 GPU，開車回覆用）─────────────────────────────
 # F5-TTS 是零樣本聲音克隆模型，需要一段參考音 + 對應逐字稿。這裡直接用 f5-tts 套件自帶
 # 的範例參考音（infer/examples/basic），因此本 repo 不必附任何音檔，也沒有授權疑慮。
 _f5_model = None  # 單例，只載入一次
+_f5_lock = threading.Lock()  # 載入鎖：啟動預載與首次合成併發時，避免模型重複載入兩份吃爆 VRAM
 _f5_refs: dict[str, tuple[str, str]] = {}  # ref_lang -> (參考音路徑, 逐字稿)，延遲解析
 
 
@@ -117,15 +122,16 @@ def _f5_ref(ref_lang: str) -> tuple[str, str]:
 def get_f5tts():
     """延遲載入 F5-TTS（單例）；首次會下載 F5TTS_v1_Base 約 1.3GB。GPU 起不來自動退 CPU。"""
     global _f5_model
-    if _f5_model is None:
-        add_cuda_dll_path()
-        from f5_tts.api import F5TTS
-        try:
-            _f5_model = F5TTS(device="cuda")
-            print("[F5] F5TTS_v1_Base 已載入 GPU", flush=True)
-        except Exception as e:
-            print(f"[F5] GPU 失敗，改用 CPU：{e}", flush=True)
-            _f5_model = F5TTS(device="cpu")
+    with _f5_lock:
+        if _f5_model is None:
+            add_cuda_dll_path()
+            from f5_tts.api import F5TTS
+            try:
+                _f5_model = F5TTS(device="cuda")
+                print("[F5] F5TTS_v1_Base 已載入 GPU", flush=True)
+            except Exception as e:
+                print(f"[F5] GPU 失敗，改用 CPU：{e}", flush=True)
+                _f5_model = F5TTS(device="cpu")
     return _f5_model
 
 
@@ -154,9 +160,10 @@ def synthesize(text: str, out_path: str, ref_lang: str = "en",
 def unload_f5tts() -> None:
     """卸載 F5-TTS 模型、釋放顯存（開車模式關閉時呼叫）。"""
     global _f5_model
-    if _f5_model is not None:
-        _f5_model = None
-        free_vram()
+    with _f5_lock:
+        if _f5_model is not None:
+            _f5_model = None
+            free_vram()
 
 
 # ── 朗讀標記抽取（純字串處理，不需任何語音套件）───────────────────────────

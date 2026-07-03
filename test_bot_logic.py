@@ -218,6 +218,16 @@ def test_purge_title_shell() -> None:
     ok("_purge_title_shell 空殼刪除/本體保留/邊界")
 
 
+def test_bar_clamp() -> None:
+    """進度條在 0～100% 正常畫；用量超過上限（>100%）或負值時要夾住，不可變形。"""
+    assert d._bar(0) == "░" * 14
+    assert d._bar(100) == "█" * 14
+    assert d._bar(50).count("█") == 7
+    assert len(d._bar(150)) == 14 and d._bar(150) == "█" * 14   # 超量：夾在全滿，長度不變
+    assert len(d._bar(-5)) == 14 and d._bar(-5) == "░" * 14     # 負值：夾在全空，長度不變
+    ok("_bar 進度條 0..100 與超量/負值 clamp")
+
+
 def main() -> None:
     test_classify_cc_error()
     test_context_limit_for()
@@ -229,6 +239,7 @@ def main() -> None:
     test_clean_reply()
     test_channel_state()
     test_purge_title_shell()
+    test_bar_clamp()
     print(f"✅ 全部通過（{passed} 項）")
 
 

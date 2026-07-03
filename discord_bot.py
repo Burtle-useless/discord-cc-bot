@@ -1033,10 +1033,11 @@ async def run_claude(
     client_task = asyncio.create_task(_run_client())
     try:
         # 閒置逾時：不限總時長，只在「連續無輸出」超過門檻才視為卡死，
-        # 讓長工作流（只要持續有輸出）能像桌面版一樣一直跑下去
+        # 讓長工作流（只要持續有輸出）能像桌面版一樣一直跑下去。
+        # 用 asyncio.wait 而非 sleep 輪詢：任務一完成立即返回，回覆不再多等輪詢間隔
         while not client_task.done():
-            await asyncio.sleep(5)
-            if time.time() - last_activity[0] > INACTIVITY_TIMEOUT:
+            await asyncio.wait({client_task}, timeout=5)
+            if not client_task.done() and time.time() - last_activity[0] > INACTIVITY_TIMEOUT:
                 raise asyncio.TimeoutError()
         await client_task  # 完成：取回結果或重新拋出 _run_client 內的例外
     finally:
@@ -1114,19 +1115,26 @@ def _pptx_to_pdf_sync(src: Path) -> Optional[Path]:
     pdf = src.with_suffix(".pdf")
     pythoncom.CoInitialize()
     pp = None
+    deck = None
     try:
         pp = win32com.client.Dispatch("PowerPoint.Application")
         # PowerPoint 不允許 Visible=False，改用 WithWindow=False 開啟簡報不顯示視窗
         deck = pp.Presentations.Open(str(src), WithWindow=False)
         deck.SaveAs(str(pdf), 32)  # 32 = ppSaveAsPDF
-        deck.Close()
         return pdf if pdf.exists() else None
     except Exception as e:
         print(f"[PPTX2PDF] 轉檔失敗 {src.name}: {e}", flush=True)
         return None
     finally:
+        # Dispatch 會附著到使用者已開啟的 PowerPoint 實例：只關自己開的簡報；
+        # 只有整個程式已無任何開啟中的簡報時才 Quit，否則會把使用者開著的工作一起關掉
         try:
-            if pp is not None:
+            if deck is not None:
+                deck.Close()
+        except Exception:
+            pass
+        try:
+            if pp is not None and pp.Presentations.Count == 0:
                 pp.Quit()
         except Exception:
             pass
@@ -1412,7 +1420,7 @@ def fetch_usage() -> Optional[dict]:
         return None
 
 def _bar(pct: float, w: int = 14) -> str:
-    f = round(pct/100*w)
+    f = max(0, min(w, round(pct/100*w)))   # 夾在 0..w：用量超過上限時避免負數 padding 讓進度條變形
     return "█"*f + "░"*(w-f)
 
 def _reset(ts: str) -> str:
@@ -1463,6 +1471,10 @@ async def _schedule_loop() -> None:
             for s in schedules:
                 try:
                     next_run = datetime.fromisoformat(s["next_run"])
+                    # CC 解析偶爾會給帶時區的 ISO 字串；與 naive 的 now 比較會 TypeError，
+                    # 一路炸到外層 except 讓整輪排程停擺，故先轉本地時間再去掉時區
+                    if next_run.tzinfo is not None:
+                        next_run = next_run.astimezone().replace(tzinfo=None)
                 except Exception:
                     continue
                 if now < next_run:
@@ -1752,8 +1764,16 @@ def _sweep_tmp(max_age_h: int = 24) -> None:
         except Exception:
             pass
 
+_ready_once = False   # on_ready 防重入：斷線後 resume 失敗會重新 identify、再次觸發 on_ready
+
 @bot.event
 async def on_ready() -> None:
+    # 重連再次觸發時直接略過，否則 _schedule_loop／_client_reaper 會疊加多份
+    global _ready_once
+    if _ready_once:
+        print("[READY] 重連觸發 on_ready，略過重複初始化", flush=True)
+        return
+    _ready_once = True
     await bot.tree.sync()
     print(t("ready_log", user=bot.user), flush=True)
     asyncio.create_task(asyncio.to_thread(_sweep_tmp))   # 啟動時清掃 tmp/ 舊檔
@@ -2648,9 +2668,7 @@ async def on_message(message: discord.Message) -> None:
                     voice_blocked = True  # 在家關閉中（或未裝開車模組），不載模型、不轉錄
                     continue
                 try:
-                    req = urllib.request.Request(att.url, headers={"User-Agent": "Mozilla/5.0"})
-                    with urllib.request.urlopen(req) as r, open(dest, "wb") as f:
-                        f.write(r.read())
+                    await att.save(dest)   # discord.py 原生非同步下載，不阻塞 event loop
                     transcript = await asyncio.to_thread(drive_core.transcribe, str(dest), t("stt_prompt"))
                     if transcript:
                         voice_texts.append(transcript)
@@ -2660,9 +2678,7 @@ async def on_message(message: discord.Message) -> None:
                     dest.unlink(missing_ok=True)  # 語音輸入音檔只需轉錄一次，用完即刪，不堆積
                 continue
             try:
-                req = urllib.request.Request(att.url, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(req) as r, open(dest, "wb") as f:
-                    f.write(r.read())
+                await att.save(dest)   # discord.py 原生非同步下載，不阻塞 event loop
                 # 簡報轉 PDF 後給 CC 視覺讀取；轉檔失敗則回退原檔
                 if dest.suffix.lower() in (".ppt", ".pptx"):
                     pdf = await _convert_pptx(dest)
