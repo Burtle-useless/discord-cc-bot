@@ -452,7 +452,7 @@ def _build_options(state: ChannelState) -> ClaudeAgentOptions:
         # bypassPermissions 也照樣觸發、且 permissionDecision="deny" 能真正擋下工具。
         # 安全動作 hook 回空 dict 放行、破壞性指令才跳確認按鈕。
         permission_mode="bypassPermissions",
-        hooks={"PreToolUse": [HookMatcher(matcher="Bash|PowerShell",
+        hooks={"PreToolUse": [HookMatcher(matcher="Bash|PowerShell|AskUserQuestion",
                                           hooks=[_make_pretool_hook(state)])]},
         fallback_model=FALLBACK_MODEL,
         max_buffer_size=MAX_BUFFER_SIZE,
@@ -656,6 +656,12 @@ def _make_pretool_hook(state: ChannelState):
                     context: object) -> dict:
         tool_name = input_data.get("tool_name", "") if isinstance(input_data, dict) else ""
         tool_input = input_data.get("tool_input", {}) if isinstance(input_data, dict) else {}
+        # AskUserQuestion：headless/SDK 下 CLI 無前端可顯示，內建工具會立刻回假 error，害 CC
+        # 誤判工具失敗而搶答。改由 hook 攔下 deny（bot 另從串流的 ToolUseBlock 攔問題內容畫
+        # Discord 按鈕），deny reason 明確告知 CC：問題已送達使用者、本回合到此為止、停止輸出
+        # 等下一則訊息。deny 不影響 ToolUseBlock 出現在串流，按鈕流程照舊。
+        if tool_name == "AskUserQuestion":
+            return _deny_hook(t("ask_delegated_reason"))
         if not _needs_confirm(tool_name, tool_input):
             return {}                                      # 非破壞性：放行，不干擾自動化工作流
         channel = bot.get_channel(cid)
@@ -1026,7 +1032,19 @@ async def run_claude(
     content, new_sid, ctx = _fold_messages(messages)
     if ctx:
         state.ctx_tokens = ctx
-    return _clean_reply(content) or _NO_RESPONSE, new_sid, pending_question or None
+    reply = _clean_reply(content)
+    # Bug A 修復：思考／輸出把 token 額度燒光（stop_reason=max_tokens）時，CC 常一個字都沒
+    # 留下。別再靜默當「無回應」吞掉，改回明確提示，讓使用者知道發生什麼、怎麼調整再重試。
+    if not reply:
+        _stop = None
+        for _m in reversed(messages):
+            _sr = getattr(_m, "stop_reason", None)
+            if _sr:
+                _stop = _sr
+                break
+        if _stop == "max_tokens":
+            return t("max_tokens_hint"), new_sid, pending_question or None
+    return reply or _NO_RESPONSE, new_sid, pending_question or None
 
 # ── [[FILE:路徑]] 標記並上傳檔案 ─────────────────────────────────────────
 _FILE_MARKER = re.compile(r"\[\[FILE:\s*(.+?)\s*\]\]")
@@ -1752,18 +1770,6 @@ async def on_guild_channel_create(channel: discord.abc.GuildChannel) -> None:
     _allowed_channels.add(channel.id)
 
 # ── Slash 指令 ─────────────────────────────────────────────────────────
-
-@bot.tree.command(name="new", description=t("cmd_new_desc"))
-async def cmd_new(interaction: discord.Interaction) -> None:
-    if not await check_auth(interaction): return
-    st = get_state(interaction.channel_id)
-    st.session_id = None
-    st.ctx_tokens = 0
-    st._session_label = t("new_chat")
-    _persist_session(st)
-    await _drop_client(interaction.channel_id)   # 開新對話，丟棄舊 client 從頭起一個（A'）
-    await _update_presence(interaction.channel_id, t("new_chat"))
-    await interaction.response.send_message(t("new_done"))
 
 @bot.tree.command(name="rename", description=t("cmd_rename_desc"))
 async def cmd_rename(interaction: discord.Interaction, name: Optional[str] = None) -> None:
