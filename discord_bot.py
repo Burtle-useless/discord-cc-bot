@@ -1653,8 +1653,9 @@ class NewChatView(discord.ui.View):
 
     @discord.ui.button(label=t("btn_new_chat"), style=discord.ButtonStyle.primary, custom_id="cc_new_chat")
     async def new_chat(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        if interaction.user.id != ALLOWED_USER:
-            await interaction.response.send_message(t("owner_only_new_chat"), ephemeral=True)
+        # 開新對話：改為所有「授權使用者」皆可按（原本限擁有者）。非授權者才擋下。
+        if interaction.user.id not in _allowed_users:
+            await interaction.response.send_message(t("no_permission"), ephemeral=True)
             return
         guild = interaction.guild
         category = interaction.channel.category if interaction.channel else None
