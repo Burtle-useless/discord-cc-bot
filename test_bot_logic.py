@@ -154,6 +154,10 @@ def test_fold_messages() -> None:
     # 歷史 bug 釘住：AskUserQuestion 收尾的空 result 不可蓋掉「問題前的說明文字」
     c, sid, _ = d._fold_messages([am("問題前的說明"), rm(None)])
     assert c == "問題前的說明" and sid == "sid-1"
+    # 上游 #50597 修復：多訊息回合、result 掉成空時，退回「最後一則」文字（結論），
+    # 而非第一則（開場白）——這正是使用者看到「只剩開場白一句話」的 bug
+    c, _, _ = d._fold_messages([am("收到，我先來查"), am("結論：改動有三處"), rm(None)])
+    assert c == "結論：改動有三處", c
     # ctx 三種 token 欄位加總
     _, _, ctx = d._fold_messages([rm("x", usage={"input_tokens": 1,
                                                  "cache_read_input_tokens": 2,

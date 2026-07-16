@@ -908,9 +908,11 @@ def _session_label(session_id: Optional[str]) -> str:
 def _fold_messages(messages: list) -> tuple[str, Optional[str], int]:
     """把一回合收到的 SDK 訊息摺疊成 (回覆文字, session_id, ctx_tokens)。
     純函式、無副作用，供單元測試以假訊息流驗證。
-    關鍵行為：空 result 不可蓋掉前面文字塊已累積的內容——AskUserQuestion 收尾的
-    result 是空的，蓋掉會讓「問題前的說明文字」消失（歷史真 bug，勿回歸）。"""
+    關鍵行為：result 優先；result 為空時退回「最後一則」有文字的 assistant 訊息——
+    AskUserQuestion 收尾（result 空）要保留「問題前的說明文字」，上游 #50597 把回合末則
+    text 掉成空 thinking 時也要退回前一則實質文字，兩者都不能讓回覆變空（歷史真 bug，勿回歸）。"""
     content, new_sid, ctx = "", None, 0
+    last_text = ""   # 最後一則有文字的 assistant 訊息：result 為空時的退路
     for m in messages:
         if isinstance(m, ResultMessage):
             if m.result:
@@ -920,11 +922,13 @@ def _fold_messages(messages: list) -> tuple[str, Optional[str], int]:
             ctx = (usage.get("input_tokens", 0)
                    + usage.get("cache_read_input_tokens", 0)
                    + usage.get("cache_creation_input_tokens", 0)) or ctx
-        elif isinstance(m, AssistantMessage) and not content:
-            for block in m.content:
-                if hasattr(block, "text"):
-                    content += block.text
-    return content, new_sid, ctx
+        elif isinstance(m, AssistantMessage):
+            txt = "".join(b.text for b in m.content if hasattr(b, "text"))
+            if txt.strip():
+                last_text = txt
+    # 取「最後一則」而非第一則：多訊息回合（開場白→工具→最終回應）第一則是開場白、
+    # 最後一則才是結論；只抓第一則會讓使用者只看到開場白那句（本次修的 bug）。
+    return (content or last_text), new_sid, ctx
 
 def _clean_reply(content: str) -> str:
     """清除回覆中的 [[MILESTONE:...]] 標記與 ThinkingBlock 殘留。純函式。"""
@@ -1130,6 +1134,10 @@ async def run_claude(
     if ctx:
         state.ctx_tokens = ctx
     reply = _clean_reply(content)
+    # 上游 #50597（Opus 工具回合後偶爾把回合末則 text 掉成空 thinking、stop=end_turn，
+    # 文字有 stream 出來卻沒進最終訊息物件）→ 用串流累積的 live_text 回收，避免整段回覆消失。
+    if not reply and live_text.strip():
+        reply = _clean_reply(live_text)
     # Bug A 修復：思考／輸出把 token 額度燒光（stop_reason=max_tokens）時，CC 常一個字都沒
     # 留下。別再靜默當「無回應」吞掉，改回明確提示，讓使用者知道發生什麼、怎麼調整再重試。
     if not reply:
