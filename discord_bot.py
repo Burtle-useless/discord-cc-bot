@@ -352,6 +352,8 @@ _clients: dict[int, "ClaudeSDKClient"] = {}
 _client_used: dict[int, float] = {}        # 每頻道 client 最後使用時間（閒置回收判斷用）
 _client_sigs: dict[int, tuple] = {}        # 每頻道 client 的設定指紋（變了就重建）
 CLIENT_IDLE_TIMEOUT = 900                  # 閒置逾時（秒）：超過則回收該頻道 client
+WHISPER_IDLE_UNLOAD = 600                  # 語音輸入常駐：Whisper 閒置這麼多秒沒新語音就卸載釋放 VRAM（顧遊戲）
+_last_voice_ts: list[float] = [0.0]        # 最後語音輸入轉錄時間戳（可變容器免 global）；>0＝Whisper 載入中
 
 
 class _StoppedByUser(Exception):
@@ -1548,6 +1550,20 @@ async def _client_reaper() -> None:
                 await _drop_client(cid)
 
 
+async def _whisper_reaper() -> None:
+    """背景迴圈：語音輸入常駐、Whisper 隨用隨載，但閒置逾時就卸載釋放 VRAM（顧遊戲），
+    下次語音再自動載回。_last_voice_ts[0]>0 代表載入中；卸載後歸零避免重複卸載。"""
+    while True:
+        await asyncio.sleep(60)
+        if drive_core is None:
+            continue
+        ts = _last_voice_ts[0]
+        if ts and time.time() - ts > WHISPER_IDLE_UNLOAD:
+            await asyncio.to_thread(drive_core.unload_whisper)
+            _last_voice_ts[0] = 0.0
+            print("[WHISPER] 閒置逾時，已卸載釋放 VRAM", flush=True)
+
+
 async def _schedule_loop() -> None:
     """每 30 秒檢查到期排程並執行。"""
     await bot.wait_until_ready()
@@ -1918,10 +1934,10 @@ async def on_ready() -> None:
     asyncio.create_task(asyncio.to_thread(_sweep_tmp))   # 啟動時清掃 tmp/ 舊檔
     asyncio.create_task(_schedule_loop())
     asyncio.create_task(_client_reaper())   # 長駐 client 閒置回收（A'）
-    # 開車模式：上次關機時若為開啟，重啟自動恢復載入兩個模型（開車中崩潰可自癒）；
-    # 在家（預設 off）則完全不載入語音模型，不吃 GPU/VRAM。
+    asyncio.create_task(_whisper_reaper())  # 語音輸入常駐：Whisper 閒置回收釋放 VRAM（顧遊戲）
+    # 語音輸入已與開車模式解耦、永遠可用，Whisper 隨用隨載＋閒置卸載，故開機不預載。
+    # 開車模式現在只管語音回應（F5/TTS）：上次關機時若為開啟，重啟自動恢復預載 F5。
     if _drive_mode and drive_core:
-        asyncio.create_task(asyncio.to_thread(drive_core.get_whisper))
         async def _bg_f5() -> None:
             try:
                 await asyncio.to_thread(drive_core.get_f5tts)
@@ -2396,7 +2412,8 @@ async def cmd_plan(interaction: discord.Interaction, plan: str) -> None:
     discord.app_commands.Choice(name="off", value="off"),
 ])
 async def cmd_drive(interaction: discord.Interaction, mode: str) -> None:
-    # 開車模式是帳號全域開關（控制兩個 GPU 模型的生命週期），限主帳號設定
+    # 開車模式現在只管「語音回應（F5/TTS）」的生命週期；語音輸入的 Whisper 已與它解耦、
+    # 永遠可用、隨用隨載＋閒置卸載。限主帳號設定。
     if not await check_auth(interaction, owner_only=True): return
     # 開車核心是選配模組：drive_core.py 被移除時，/drive 直接回報未安裝、不當機
     if drive_core is None:
@@ -2406,9 +2423,8 @@ async def cmd_drive(interaction: discord.Interaction, mode: str) -> None:
     if mode == "on":
         _drive_mode = True
         drive_core.save_drive(_DRIVE_FILE, True)   # 立刻存檔，重啟後自動恢復載入
-        # 載入兩個模型耗時（首次還要下載），先即時回「載入中」避免互動 3 秒逾時
+        # 載入 F5 耗時（首次還要下載），先即時回「載入中」避免互動 3 秒逾時
         await interaction.response.send_message(t("drive_on_loading"))
-        await asyncio.to_thread(drive_core.get_whisper)
         try:
             await asyncio.to_thread(drive_core.get_f5tts)
         except Exception as e:
@@ -2419,8 +2435,7 @@ async def cmd_drive(interaction: discord.Interaction, mode: str) -> None:
     else:
         _drive_mode = False
         drive_core.save_drive(_DRIVE_FILE, False)
-        # 卸載兩個模型、釋放 VRAM，回到純文字 bot
-        await asyncio.to_thread(drive_core.unload_whisper)
+        # 只卸載 F5（語音回應）；語音輸入的 Whisper 交給閒置回收器自行釋放，不在此動它
         await asyncio.to_thread(drive_core.unload_f5tts)
         await interaction.response.send_message(t("drive_off"))
 
@@ -2812,12 +2827,13 @@ async def on_message(message: discord.Message) -> None:
             dest = tmp_dir / f"{uuid.uuid4().hex[:6]}_{att.filename}"
             # 語音訊息 → 本機 STT 轉文字（CC 讀不了音訊），不當檔案路徑給 CC
             if (att.content_type or "").startswith("audio/"):
-                if not _drive_mode or drive_core is None:
-                    voice_blocked = True  # 在家關閉中（或未裝開車模組），不載模型、不轉錄
+                if drive_core is None:
+                    voice_blocked = True  # 語音輸入已與開車模式解耦、永遠可用；只有未裝語音模組才擋
                     continue
                 try:
                     await att.save(dest)   # discord.py 原生非同步下載，不阻塞 event loop
                     transcript = await asyncio.to_thread(drive_core.transcribe, str(dest), t("stt_prompt"))
+                    _last_voice_ts[0] = time.time()   # 記錄語音使用時間，供 Whisper 閒置回收器判斷
                     if transcript:
                         voice_texts.append(transcript)
                 except Exception as ex:
@@ -2845,7 +2861,7 @@ async def on_message(message: discord.Message) -> None:
             text = (text + " " if text else "") + t("voice_hint", heard=heard)
         # 開車模式關閉時收到語音 → 提示要先開（文字附件仍照常處理）
         if voice_blocked and not voice_texts:
-            await message.channel.send(t("drive_off_voice"))
+            await message.channel.send(t("drive_unavailable"))
         if failed and not saved and not text:
             await message.channel.send(t("attach_failed", failed=', '.join(failed)))
             _processing[message.channel.id] = False
