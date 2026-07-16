@@ -1774,8 +1774,11 @@ async def _promote_entry_channel(old_entry: discord.TextChannel) -> bool:
         # 1) 先建新的空白入口頻道並頂到最上面（先建，確保永遠有入口可用；此步失敗
         #    則舊入口原封不動、直接放棄本次轉正）。名字以 ➕ 開頭，
         #    on_guild_channel_create 會據此跳過、不誤綁成對話 session。
-        new_entry = await guild.create_text_channel(
-            SIDEBAR_ENTRY, category=category, position=0)
+        #    用 create 後 move(beginning=True) 而非 create(position=0)：後者在舊入口仍佔
+        #    position 0 時會撞號（兩頻道同 position，Discord 以 id 決勝負，入口反被壓下去），
+        #    move 由伺服器端重算 position，可靠地把入口放到分類最頂端。
+        new_entry = await guild.create_text_channel(SIDEBAR_ENTRY, category=category)
+        await new_entry.move(beginning=True, category=category)
         try:
             await new_entry.send(t("entry_message"))
         except Exception as e:
