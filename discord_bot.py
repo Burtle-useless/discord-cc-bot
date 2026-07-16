@@ -1850,6 +1850,13 @@ async def _ensure_sidebar(guild: discord.Guild) -> None:
         if entry is None:
             entry = await guild.create_text_channel(SIDEBAR_ENTRY, category=category, position=0)
         _sidebar_entry_id = entry.id
+        # 入口固定在最上面：既有入口可能被對話頻道擠到下面（重啟前殘留的排序），開機時
+        # 移回分類頂端；已在頂端就不動，省 rate limit
+        if category.text_channels and category.text_channels[0].id != entry.id:
+            try:
+                await entry.move(beginning=True, category=category)
+            except Exception as e:
+                print(f"[SIDEBAR] 入口置頂失敗：{e}", flush=True)
         # 入口頻道發一則純文字提示（避免重複洗頻）；順手清掉舊版遺留的按鈕訊息
         has_prompt = False
         async for m in entry.history(limit=20):
