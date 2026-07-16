@@ -159,8 +159,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         "new_chat_ready": "✅ New chat ready → {mention} (go there and type your first message)",
         "entry_message": (
             "**🗂️ CC Conversations**\n"
-            "• Tap the button below → start a new chat (creates a channel above)\n"
-            "• To resume an old chat → use `/sessions` (all) or `/search <query>` (by meaning) here; picking one restores it into a new channel"
+            "• Just type anything here → instantly start a new chat (this channel becomes that conversation, and a fresh entry channel is added on top)\n"
+            "• To resume an old chat → use `/sessions` (all) or `/search <query>` (by meaning); picking one restores it into a new channel"
         ),
         # 權限
         "no_permission": "❌ No permission.",
@@ -627,8 +627,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         "new_chat_ready": "✅ 已開好新對話 → {mention}（點我過去，在裡面打第一句話）",
         "entry_message": (
             "**🗂️ CC 對話**\n"
-            "• 點下面按鈕 → 開一個新對話（在上方建新頻道）\n"
-            "• 想接續舊對話 → 在這裡打 `/sessions`（全部）或 `/search 查詢`（用大概意思找），選一個會救回成新頻道"
+            "• 直接在這裡輸入任何內容 → 立刻開始一段新對話（這個頻道會就地變成該對話，並自動補一個新入口到最上面）\n"
+            "• 想接續舊對話 → 打 `/sessions`（全部）或 `/search 查詢`（用大概意思找），選一個會救回成新頻道"
         ),
         "no_permission": "❌ 無權限。",
         "owner_only": "❌ 只有主帳號能執行此指令。",

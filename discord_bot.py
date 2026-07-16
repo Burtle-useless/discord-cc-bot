@@ -154,6 +154,7 @@ class ChannelState:
     _session_label: Optional[str] = None         # 顯示用標題快取
     _sidebar: bool = False                       # 是否為側欄對話頻道（記憶體旗標）
     _named: bool = False                         # 側欄頻道是否已完成命名（防重複自動改名）
+    _live_msg: Optional["discord.Message"] = None  # 進行中的過程訊息（軌跡往下累積用）；錯誤路徑供 on_message 取當前那則
 
 # ── 允許使用者持久化 ────────────────────────────────────────────────────
 def _load_allowed_users() -> set[int]:
@@ -936,97 +937,149 @@ async def run_claude(
     progress_msg: Optional[discord.Message] = None,
 ) -> tuple[str, Optional[str], Optional[dict]]:
     """回傳 (content, new_session_id, ask_question_data)"""
-    tool_log: list[str] = []
+    trace: str = ""      # 已定稿的過程軌跡：一步步往下累積、不覆蓋（顯示在同一則訊息內）
     tool_count: int = 0
     start = time.time()
     pending_question: dict = {}
-    live_text: str = ""  # 生成中累積的回應文字（給動畫即時顯示）
+    live_text: str = ""  # 生成中累積的回應文字（底部狀態列即時顯示尾段）
+    live_think: str = ""  # 生成中累積的思考內容（thinking_delta，底部狀態列即時顯示尾段）
+    cur_msg = progress_msg           # 當前正在往下寫的過程訊息（撞 2000 上限會換新的一則）
+    state._live_msg = progress_msg   # 同步給 on_message：錯誤路徑要在這則上顯示錯誤
     last_activity = [time.time()]  # CC 最後一次有輸出的時間（閒置逾時判斷用）
-    # 本回合指令原文（去掉 [名字]: 前綴、壓成單行、去反引號、截斷），顯示在思考訊息頂部供使用者核對，
+    # 本回合指令原文（去掉 [名字]: 前綴、壓成單行、去反引號、截斷），顯示在過程訊息底部狀態列供使用者核對，
     # 一眼確認「在跑的是自己給的指令」（防幻象指令、防檔案/網路夾帶的惡意指令）
     _cmd_disp = _BOT_PROMPT_RE.sub("", prompt).replace("\n", " ").replace("`", "'").strip()[:100]
 
-    async def on_stream(upd) -> None:
-        nonlocal pending_question, tool_count
-        if getattr(upd, "tool_calls", None):
-            for tc in upd.tool_calls:
-                name = tc.get("name", "?")
-                inp = tc.get("input", {})
+    def _commit_step(am) -> None:
+        """把一個 AssistantMessage 定稿成軌跡的一段（往下累積、不覆蓋）：
+        思考→摘要一行、工具→_fmt_tool、過場白→💭第一行。純正式回應（無思考無工具）
+        不進軌跡，交給最後的 reply 呈現，避免同一段文字重複出現兩次。"""
+        nonlocal trace, pending_question, tool_count, live_text, live_think
+        content = getattr(am, "content", [])
+        if not isinstance(content, list):
+            return
+        has_tool = any(isinstance(b, ToolUseBlock) for b in content)
+        has_think = any(getattr(b, "thinking", None) for b in content)
+        if not (has_tool or has_think):
+            return                      # 純正式回應：留給 reply，不重複進軌跡
+        lines: list[str] = []
+        for block in content:
+            think = getattr(block, "thinking", None)
+            if think:
+                s = think.strip().replace("\n", " ")
+                if s:
+                    lines.append(f"🧠 {s[:120]}")
+            elif isinstance(block, ToolUseBlock):
+                name = block.name
+                inp = getattr(block, "input", {}) or {}
                 if name == "AskUserQuestion":
                     pending_question = inp
-                tool_log.append(_fmt_tool(name, inp))
+                lines.append(_fmt_tool(name, inp))
                 tool_count += 1
-        if getattr(upd, "type","") == "assistant" and getattr(upd, "content", None):
-            text = upd.content
-            line = text.strip().split("\n",1)[0][:100]
-            if line and not line.startswith("["):
-                tool_log.append(f"💭 {line}")
+            elif has_tool and hasattr(block, "text"):
+                # 只有「這步真的動了工具」才把過場白第一行放進軌跡；無工具步的 text
+                # 可能是最終回應，留給 reply 呈現，避免同一句在軌跡與回應各出現一次
+                txt = (block.text or "").strip()
+                if txt:
+                    first = txt.split("\n", 1)[0][:100]
+                    if not first.startswith("["):
+                        lines.append(f"💭 {first}")
+        if lines:
+            trace += ("\n" if trace else "") + "\n".join(lines)
+        # 這步已定稿進軌跡 → 清即時尾段，下一步重新累積
+        live_text = ""
+        live_think = ""
 
     _spinner = ["🌑","🌒","🌓","🌔","🌕","🌖","🌗","🌘"]
+
+    def _status_block(icon: str, elapsed: int) -> str:
+        """底部狀態列：釘在軌跡下方、跟著最新內容往下走，使用者不必往上捲就看得到
+        『在跑什麼＋當前思考/生成尾段』。原本這排在頂部，軌跡一長就要往上捲，故移到底。"""
+        first = f"{icon} **{t('thinking_inline')}** `{elapsed}s`"
+        if state._session_label:
+            _m = state.model
+            _ms = _m.replace("claude-", "") if _m else t("default_inline")
+            _eff = state.effort or t("default_inline")
+            first += f"　💬 `{state._session_label}`　🧠 `{_ms}·{_eff}`"
+        lines = [first]
+        # 本回合指令原文：讓使用者核對「在跑的是我給的指令」（防幻象／夾帶指令）
+        if _cmd_disp:
+            lines.append(f"📥 `{_cmd_disp}`")
+        # 即時思考尾段：讓使用者看到「這一步正在想什麼」（存活訊號之一）
+        if live_think:
+            _tk = live_think[-180:].replace("\n", " ")
+            lines.append(f"🧠 {_tk}")
+        # 生成階段：回應字數 + 即時文字尾段，作為「還活著」的存活訊號
+        if live_text:
+            _tx = live_text[-180:].replace("\n", " ")
+            lines.append(t("generating", n=len(live_text)) + f"　> {_tx}")
+        return "\n".join(lines)
+
+    async def _roll_message() -> None:
+        """軌跡撞單則 2000 字上限：把舊訊息凍結成純軌跡永久保留，另開一則新訊息繼續往下累積。
+        先同步交換 trace 再 await，避免換訊息期間 _commit_step 的新內容漏進舊清單而遺失。"""
+        nonlocal cur_msg, trace
+        frozen, trace = trace.strip(), ""
+        try:
+            if frozen and cur_msg:
+                await cur_msg.edit(content=frozen[:1990])
+        except Exception:
+            pass
+        ch = getattr(cur_msg, "channel", None)
+        try:
+            cur_msg = state._live_msg = (await ch.send("🌑 …")) if ch else None
+        except Exception:
+            cur_msg = state._live_msg = None
 
     async def _animate() -> None:
         i = 0
         while True:
             await asyncio.sleep(1.5)
-            if not progress_msg:
+            if not cur_msg:
                 continue
             elapsed = int(time.time() - start)
-            body = "\n".join(tool_log[-6:])
-            # 生成階段：顯示回應字數 + 即時文字尾段，作為「還活著」的存活訊號
-            if live_text:
-                tail = live_text[-220:].replace("\n", " ")
-                body += "\n\n" + t("generating", n=len(live_text)) + f"\n> {tail}"
             icon = _spinner[i % len(_spinner)]
             i += 1
-            # 頂部第一行：本回合正在處理的指令原文，讓使用者核對「在跑的是我給的指令」
-            _cmd_line = f"📥 `{_cmd_disp}`\n" if _cmd_disp else ""
-            # 第二行顯示目前 session + 模型/思考程度，工作時一眼掌握在哪個對話、用什麼設定
-            if state._session_label:
-                _m = state.model
-                _ms = _m.replace("claude-", "") if _m else t("default_inline")
-                _eff = state.effort or t("default_inline")
-                hdr = _cmd_line + f"💬 `{state._session_label}`　🧠 `{_ms}·{_eff}`\n"
-            else:
-                hdr = _cmd_line
+            status = _status_block(icon, elapsed)
+            body = trace.strip()
+            # 軌跡在上、狀態列在下：一步步往下累積、不覆蓋前面
+            full = f"{body}\n\n{status}" if body else status
+            # 撞單則 2000 上限 → 換一則新訊息接續（軌跡保留、通知一般只多跳一次）
+            if len(full) > 1990:
+                await _roll_message()
+                full = _status_block(icon, elapsed)   # 換訊息後 trace 已清空，只剩底部狀態列
             try:
-                await progress_msg.edit(content=f"{hdr}{icon} **{t('thinking_inline')}** `{elapsed}s`\n{body}"[:1990])
+                if cur_msg:
+                    await cur_msg.edit(content=full[:1990])
             except Exception:
                 pass
 
     messages = []
 
     async def _run_client() -> None:
-        nonlocal live_text
+        nonlocal live_text, live_think
         try:
             client = await _acquire_client(state)   # 長駐：取池中 client，無則新建連線
             await client.query(prompt)
             async for message in _iter_messages(client):
                 last_activity[0] = time.time()  # 有任何訊息=還活著，重置閒置計時
-                # 逐字串流：累積生成中的回應文字供動畫顯示
+                # 逐字串流：累積生成中的思考／回應文字，供底部狀態列即時顯示尾段（存活訊號）
                 if isinstance(message, StreamEvent):
                     ev = message.event or {}
                     if ev.get("type") == "content_block_delta":
                         delta = ev.get("delta", {})
-                        if delta.get("type") == "text_delta":
+                        dt = delta.get("type")
+                        if dt == "text_delta":
                             live_text += delta.get("text", "")
+                        elif dt == "thinking_delta":
+                            live_think += delta.get("thinking", "")
                     continue
                 messages.append(message)
                 if isinstance(message, ResultMessage):
                     _client_used[state._cid] = time.time()  # 標記活躍；client 留池不關
                     break
                 if isinstance(message, AssistantMessage):
-                    content = getattr(message, "content", [])
-                    tc_list, text_parts = [], []
-                    if isinstance(content, list):
-                        for block in content:
-                            if isinstance(block, ToolUseBlock):
-                                tc_list.append({"name": block.name, "input": getattr(block,"input",{})})
-                            elif hasattr(block, "text"):
-                                text_parts.append(block.text)
-                    class _U:
-                        def __init__(self,**kw): self.__dict__.update(kw)
-                    if tc_list:    await on_stream(_U(type="tool",      tool_calls=tc_list,  content=None))
-                    if text_parts: await on_stream(_U(type="assistant", content="\n".join(text_parts), tool_calls=None))
+                    _commit_step(message)   # 這一步定稿成軌跡的一段（往下累積、不覆蓋前面）
         except Exception:
             # 長駐 client 可能已損壞（連線斷／進程死）→ 丟棄，下次重建並 resume 接回
             await _drop_client(state._cid)
@@ -1034,6 +1087,7 @@ async def run_claude(
 
     anim_task = asyncio.create_task(_animate()) if progress_msg else None
     client_task = asyncio.create_task(_run_client())
+    ok = False
     try:
         # 閒置逾時：不限總時長，只在「連續無輸出」超過門檻才視為卡死，
         # 讓長工作流（只要持續有輸出）能像桌面版一樣一直跑下去。
@@ -1043,6 +1097,7 @@ async def run_claude(
             if not client_task.done() and time.time() - last_activity[0] > INACTIVITY_TIMEOUT:
                 raise asyncio.TimeoutError()
         await client_task  # 完成：取回結果或重新拋出 _run_client 內的例外
+        ok = True
     finally:
         if not client_task.done():
             client_task.cancel()
@@ -1057,6 +1112,19 @@ async def run_claude(
                 pass
         if anim_task:
             anim_task.cancel()
+        # 過程訊息收尾：成功才把當前那則定稿成純軌跡永久保留（無軌跡＝簡單問答則刪掉不留殘訊）。
+        # 失敗（逾時／中斷／例外）不動它，保留現況與 state._live_msg，讓 on_message 在同一則上顯示錯誤。
+        if ok:
+            if cur_msg:
+                _final = trace.strip()
+                try:
+                    if _final:
+                        await cur_msg.edit(content=_final[:1990])
+                    else:
+                        await cur_msg.delete()
+                except Exception:
+                    pass
+            state._live_msg = None
 
     content, new_sid, ctx = _fold_messages(messages)
     if ctx:
@@ -1551,6 +1619,7 @@ async def _update_presence(cid: int, label: str) -> None:
 # ── 多 session 側欄（頻道即對話）─────────────────────────────────────────
 _sidebar_category_id: Optional[int] = None   # 「CC 對話」分類 id
 _sidebar_entry_id: Optional[int] = None      # 入口頻道 id
+_promoting_entry: bool = False               # 入口轉正進行中旗標：防連點建出多個入口
 
 def _safe_channel_name(title: str) -> str:
     """把標題轉成可用的頻道名：去頭尾空白、換行轉空白、截斷到 90 字。"""
@@ -1646,30 +1715,6 @@ async def _restore_session_to_channel(inter: discord.Interaction, entry: dict) -
     await inter.response.edit_message(
         content=t("switched_to", title=title, cwd=cwd, note=note), view=None)
 
-class NewChatView(discord.ui.View):
-    """入口頻道的常駐「開新對話」按鈕（custom_id 固定、timeout=None，重啟後仍可點）。"""
-    def __init__(self) -> None:
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label=t("btn_new_chat"), style=discord.ButtonStyle.primary, custom_id="cc_new_chat")
-    async def new_chat(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        # 開新對話：改為所有「授權使用者」皆可按（原本限擁有者）。非授權者才擋下。
-        if interaction.user.id not in _allowed_users:
-            await interaction.response.send_message(t("no_permission"), ephemeral=True)
-            return
-        guild = interaction.guild
-        category = interaction.channel.category if interaction.channel else None
-        if guild is None or category is None:
-            await interaction.response.send_message(t("no_category"), ephemeral=True)
-            return
-        ch = await _open_sidebar_channel(guild, category)
-        if ch is None:
-            await interaction.response.send_message(
-                t("open_channel_failed"), ephemeral=True)
-            return
-        await interaction.response.send_message(
-            t("new_chat_ready", mention=ch.mention), ephemeral=True)
-
 async def _bump_channel_to_top(channel: discord.TextChannel) -> None:
     """把側欄頻道移到入口下方（最新活動置頂）；已在頂端就不動，省 rate limit。"""
     try:
@@ -1687,6 +1732,56 @@ async def _bump_channel_to_top(channel: discord.TextChannel) -> None:
     except Exception as e:
         print(f"[SIDEBAR] 置頂失敗：{e}", flush=True)
 
+async def _promote_entry_channel(old_entry: discord.TextChannel) -> bool:
+    """『原地開新對話』核心：把當前入口頻道就地轉成一個對話頻道，並另建一個新的
+    空白入口頂到最上面。回傳 True＝已轉正（呼叫端接著把使用者這句話當這通新對話的
+    第一句、用同一頻道照常處理）；False＝無法轉正（並發重入／缺分類／缺權限），
+    呼叫端應放掉這則、不做半套處理。"""
+    global _sidebar_entry_id, _promoting_entry
+    # 防重入：極快連打時只轉正一次、只補一個入口（協程單線程，此段到設 True 前無 await）
+    if _promoting_entry:
+        return False
+    guild = old_entry.guild
+    category = old_entry.category
+    if guild is None or category is None or category.id != _sidebar_category_id:
+        return False
+    _promoting_entry = True
+    try:
+        # 1) 先建新的空白入口頻道並頂到最上面（先建，確保永遠有入口可用；此步失敗
+        #    則舊入口原封不動、直接放棄本次轉正）。名字以 ➕ 開頭，
+        #    on_guild_channel_create 會據此跳過、不誤綁成對話 session。
+        new_entry = await guild.create_text_channel(
+            SIDEBAR_ENTRY, category=category, position=0)
+        try:
+            await new_entry.send(t("entry_message"))
+        except Exception as e:
+            print(f"[SIDEBAR] 入口提示訊息發送失敗：{e}", flush=True)
+        # 2) 舊入口就地轉正為對話頻道：納入可用清單、標記側欄、留待第一句後自動命名。
+        #    立刻改暫名去掉 ➕（沿用新頻道預設名），避免與新入口同名並存、
+        #    也讓重啟後 _ensure_sidebar 不會把它誤認成入口。
+        st = get_state(old_entry.id)
+        st._sidebar = True
+        st._named = False          # 第一句後由 _autoname_channel 生成中文標題再改名
+        st.session_id = None       # 全新對話
+        _allowed_channels.add(old_entry.id)
+        try:
+            await old_entry.edit(name=t("new_chat_channel"))
+        except Exception as e:
+            print(f"[SIDEBAR] 入口轉正改名失敗：{e}", flush=True)
+        # 3) 轉正完成才把「當前入口」指標切到新頻道
+        _sidebar_entry_id = new_entry.id
+        # 4) 舊入口（現在是最新活動的對話）移到新入口正下方
+        await _bump_channel_to_top(old_entry)
+        return True
+    except discord.Forbidden:
+        print("[SIDEBAR] 缺『管理頻道』權限，入口轉正失敗", flush=True)
+        return False
+    except Exception as e:
+        print(f"[SIDEBAR] 入口轉正失敗：{e}", flush=True)
+        return False
+    finally:
+        _promoting_entry = False
+
 async def _autoname_channel(channel: discord.TextChannel, state: ChannelState) -> None:
     """側欄頻道第一句後：讀內容生成中文標題、改頻道名（受 2 次/10 分鐘改名限制，故只改一次）。"""
     try:
@@ -1701,18 +1796,20 @@ async def _autoname_channel(channel: discord.TextChannel, state: ChannelState) -
         print(f"[SIDEBAR] 自動改名失敗：{e}", flush=True)
 
 async def _ensure_sidebar(guild: discord.Guild) -> None:
-    """確保「CC 對話」分類與入口頻道存在、掛上常駐按鈕，並把分類底下頻道納入可用清單。"""
+    """確保「CC 對話」分類與入口頻道存在、發上入口提示訊息，並把分類底下頻道納入可用清單。"""
     global _sidebar_category_id, _sidebar_entry_id
     try:
         category = discord.utils.get(guild.categories, name=SIDEBAR_CATEGORY)
         if category is None:
             category = await guild.create_category(SIDEBAR_CATEGORY)
         _sidebar_category_id = category.id
-        # 分類底下的對話頻道全部納入可用清單（入口頻道除外）
-        entry = None
+        # 分類底下的頻道分兩類：入口（名字以 ➕ 開頭）與對話頻道。「原地開新對話」
+        # 轉正過程若剛好卡在重啟，可能短暫存在多個 ➕ 頻道；取最上面（position 最小）
+        # 那個當唯一入口，其餘一律當對話頻道納入可用清單。
+        entry_candidates: list[discord.TextChannel] = []
         for ch in category.text_channels:
             if ch.name == SIDEBAR_ENTRY or ch.name.startswith("➕"):
-                entry = ch
+                entry_candidates.append(ch)
             else:
                 _allowed_channels.add(ch.id)
                 # 旗標只存在記憶體、不寫檔，bot 重啟就消失；在此替既有側欄頻道補回，
@@ -1720,6 +1817,15 @@ async def _ensure_sidebar(guild: discord.Guild) -> None:
                 st = get_state(ch.id)
                 st._sidebar = True
                 st._named = True   # 既有頻道已有名字，標記為已命名以免重啟後被自動改名
+        entry = None
+        if entry_candidates:
+            entry_candidates.sort(key=lambda c: c.position)
+            entry = entry_candidates[0]                      # 最上面的當入口
+            for extra in entry_candidates[1:]:               # 其餘 ➕ 頻道收編成對話頻道
+                _allowed_channels.add(extra.id)
+                st = get_state(extra.id)
+                st._sidebar = True
+                st._named = True
         # 使用者可能把對話頻道搬到別的分類自行歸類；那些頻道不在上面的「CC 對話」
         # 分類裡，重啟後不會被上面的迴圈補回 _allowed_channels，會被訊息閘門判為
         # 非授權而不回應。這裡用持久化的 session map（跨分類的頻道↔session 綁定）把
@@ -1736,16 +1842,20 @@ async def _ensure_sidebar(guild: discord.Guild) -> None:
         if entry is None:
             entry = await guild.create_text_channel(SIDEBAR_ENTRY, category=category, position=0)
         _sidebar_entry_id = entry.id
-        # 入口頻道若還沒有按鈕訊息就發一則（已發過就不重複）
-        has_btn = False
+        # 入口頻道發一則純文字提示（避免重複洗頻）；順手清掉舊版遺留的按鈕訊息
+        has_prompt = False
         async for m in entry.history(limit=20):
-            if m.author == bot.user and m.components:
-                has_btn = True
-                break
-        if not has_btn:
-            await entry.send(
-                t("entry_message"),
-                view=NewChatView())
+            if m.author != bot.user:
+                continue
+            if m.components:                 # 舊版按鈕訊息 → 清掉（本版改純打字式）
+                try:
+                    await m.delete()
+                except Exception:
+                    pass
+                continue
+            has_prompt = True                # 已有純文字提示，不重複發
+        if not has_prompt:
+            await entry.send(t("entry_message"))
         print(f"[SIDEBAR] category={_sidebar_category_id} entry={_sidebar_entry_id}", flush=True)
     except discord.Forbidden:
         print("[SIDEBAR] 缺少管理頻道權限，略過側欄初始化", flush=True)
@@ -1803,8 +1913,7 @@ async def on_ready() -> None:
             except Exception as e:
                 print(f"[F5] 預載失敗：{e}", flush=True)
         asyncio.create_task(_bg_f5())
-    # 多 session 側欄：註冊常駐按鈕 + 確保分類/入口頻道存在
-    bot.add_view(NewChatView())   # 讓重啟前發出的按鈕仍可點
+    # 多 session 側欄：確保分類/入口頻道存在
     guild = bot.guilds[0] if bot.guilds else None
     if guild:
         await _ensure_sidebar(guild)
@@ -1846,6 +1955,7 @@ async def on_guild_channel_create(channel: discord.abc.GuildChannel) -> None:
         return
     if (channel.category_id != _sidebar_category_id
             or channel.id == _sidebar_entry_id
+            or channel.name.startswith("➕")   # 新入口（原地開新對話補的）不綁 session
             or channel.id in _allowed_channels):
         return
     st = get_state(channel.id)
@@ -2641,6 +2751,14 @@ async def cmd_guide(interaction: discord.Interaction, topic: Optional[str] = Non
 async def on_message(message: discord.Message) -> None:
     if message.author.bot:
         return
+    # 『原地開新對話』：授權使用者在當前入口頻道打字（非指令）→ 把這個入口就地轉成
+    # 對話頻道、另補一個新空白入口到最上面，再用同一頻道照常處理這句話。
+    if (message.channel.id == _sidebar_entry_id
+            and message.author.id in _allowed_users
+            and not message.content.startswith("/")):
+        if not await _promote_entry_channel(message.channel):
+            return   # 並發重入／缺權限：放掉這則、不做半套處理（使用者重打即可）
+        # 轉正成功：此頻道現已在 _allowed_channels，往下照常跑對話流程
     if message.channel.id not in _allowed_channels or message.author.id not in _allowed_users:
         return
     if message.content.startswith("/"):   # slash 指令走 interaction 事件，不進 CC
@@ -2735,7 +2853,7 @@ async def on_message(message: discord.Message) -> None:
     # Auto-compact：context 達門檻先壓縮
     await _maybe_auto_compact(message.channel, state)
 
-    # 目前 session 標題，顯示在思考中訊息頂部，工作時一眼知道在哪個對話
+    # 目前 session 標題，顯示在過程訊息底部狀態列，工作時一眼知道在哪個對話
     state._session_label = await asyncio.to_thread(_session_label, state.session_id)
 
     progress_msg = await message.channel.send(t("thinking"))
@@ -2750,7 +2868,7 @@ async def on_message(message: discord.Message) -> None:
             # 更新標題與 bot 狀態（新對話此時才有 session 檔可讀標題）
             state._session_label = await asyncio.to_thread(_session_label, new_sid)
             await _update_presence(message.channel.id, state._session_label)
-        await progress_msg.delete()
+        # 過程軌跡訊息已由 run_claude 收尾（有軌跡＝定稿保留、無軌跡＝自刪），這裡不再刪除
         if ask_data:
             # 先送出「問題前的說明文字（思考結果）」，再送問題按鈕；
             # 否則使用者只會看到問題按鈕、看不到上方的說明文字
@@ -2775,17 +2893,18 @@ async def on_message(message: discord.Message) -> None:
         elif state._sidebar:
             asyncio.create_task(_bump_channel_to_top(message.channel))
     except _StoppedByUser:
-        await progress_msg.edit(content=t("stopped"))
+        await (state._live_msg or progress_msg).edit(content=t("stopped"))
     except CCError as e:
-        await _handle_cc_error(progress_msg, e, state)
+        await _handle_cc_error(state._live_msg or progress_msg, e, state)
         if time.time() - t0 >= NOTIFY_AFTER_SEC:
             await message.channel.send(t("notify_error", mention=message.author.mention))
     except Exception as e:
         print(f"[CC_FAIL] kind=UNCLASSIFIED raw={e!r}", flush=True)
         detail = f"{type(e).__name__}: {e}"[:1500]
-        await progress_msg.edit(content=t("unexpected_error", detail=detail)[:2000])
+        await (state._live_msg or progress_msg).edit(content=t("unexpected_error", detail=detail)[:2000])
     finally:
         _processing[message.channel.id] = False
+        state._live_msg = None   # 清掉過程訊息參照（成功時 run_claude 已清，這裡兜底錯誤路徑）
 
 def _acquire_single_instance_lock() -> Optional["socket.socket"]:
     """單一實例防呆：綁定固定本機 port，綁不上代表已有 bot 在跑，回傳 None。
