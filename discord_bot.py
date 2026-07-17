@@ -501,6 +501,11 @@ def _build_options(state: ChannelState) -> ClaudeAgentOptions:
     )
     # 開啟逐字串流，讓生成中的回應能即時顯示在「思考中」訊息，提供存活訊號
     options.include_partial_messages = True
+    # 讓 Opus（4.7 起 API 預設 thinking.display=omitted，只回空思考殼＋加密簽章、
+    # 無 thinking_delta）也吐出思考明文：透過 CLI flag --thinking-display summarized
+    # 繞過。SDK 尚未把 thinking.display 轉發到 CLI（見 anthropics/claude-agent-sdk-python#831），
+    # 故走 extra_args。對 Sonnet 無害（本就 summarized），實測 Opus 4.8 direct path 有效。
+    options.extra_args = {**(options.extra_args or {}), "thinking-display": "summarized"}
     return options
 
 
@@ -1013,13 +1018,13 @@ async def run_claude(
                 lines.append(_fmt_tool(name, inp))
                 tool_count += 1
             elif has_tool and hasattr(block, "text"):
-                # 只有「這步真的動了工具」才把過場白第一行放進軌跡；無工具步的 text
-                # 可能是最終回應，留給 reply 呈現，避免同一句在軌跡與回應各出現一次
+                # 只有「這步真的動了工具」才把過場白放進軌跡；無工具步的 text 可能是最終回應，
+                # 留給 reply 呈現，避免同一句在軌跡與回應各出現一次。有工具的訊息裡的 text 一定是
+                # 「動手前的中文說明」（這一步在做什麼、為什麼），完整保留（截到 400 字防軌跡爆長、
+                # 保留換行），讓使用者看清每一步的意圖，而不只第一行。
                 txt = (block.text or "").strip()
-                if txt:
-                    first = txt.split("\n", 1)[0][:100]
-                    if not first.startswith("["):
-                        lines.append(f"💭 {first}")
+                if txt and not txt.startswith("["):
+                    lines.append(f"💭 {txt[:400]}")
         if lines:
             trace += ("\n" if trace else "") + "\n".join(lines)
         # 這步已定稿進軌跡 → 清即時尾段，下一步重新累積
