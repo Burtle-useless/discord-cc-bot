@@ -214,8 +214,8 @@ latest.
 | `/guide` | Built-in user manual — pick a topic, get a plain-language walkthrough |
 | `/stop` | Stop the currently running task |
 | `/status` | Show current status |
-| `/model` | Pick the Claude model |
-| `/effort` | Pick the thinking effort level |
+| `/model`, `/effort` | Set the account-wide default model / thinking effort |
+| `/model_session`, `/effort_session` | Override the model / effort for the current chat only |
 | `/plan` | Set your subscription plan (applies the official 1M-context rule) |
 | `/drive` | Drive mode: voice in, voice out (on/off) |
 | `/cd`, `/pwd` | Change / show the working directory |

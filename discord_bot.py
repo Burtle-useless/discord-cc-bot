@@ -195,9 +195,39 @@ def _save_plan(plan: str) -> None:
 
 _account_plan: str = _load_plan()
 
+# ── 帳號預設 model/effort 持久化（三層設定的中間層）──────────────────────────
+# 設定優先序：單一對話覆寫（ChannelState.model/effort）→ 帳號預設（此處）→ 內建後備。
+# /model、/effort 設這層「帳號預設」，套用到所有未被單獨覆寫的對話；仿帳號方案存一份。
+_DEFAULTS_FILE = _BOT_DIR / "account_defaults.json"
+
+def _load_defaults() -> tuple[Optional[str], Optional[str]]:
+    """讀帳號預設 (model, effort)：檔案有才回值，否則 (None, None)＝落回內建後備。"""
+    try:
+        d = json.loads(_DEFAULTS_FILE.read_text())
+        return d.get("model"), d.get("effort")
+    except Exception:
+        return None, None
+
+def _save_defaults() -> None:
+    try:
+        _DEFAULTS_FILE.write_text(json.dumps(
+            {"model": _default_model, "effort": _default_effort}, ensure_ascii=False))
+    except Exception:
+        pass
+
+_default_model, _default_effort = _load_defaults()
+
+def _eff_model(state: ChannelState) -> str:
+    """該對話實際生效的模型：對話覆寫 → 帳號預設 → 內建後備（DEFAULT_MODEL）。"""
+    return state.model or _default_model or DEFAULT_MODEL
+
+def _eff_effort(state: ChannelState) -> Optional[str]:
+    """該對話實際生效的思考程度：對話覆寫 → 帳號預設（None＝SDK 預設）。"""
+    return state.effort or _default_effort
+
 def _ctx_limit(state: ChannelState) -> int:
-    """該 session 目前的 context 上限：依其模型（未設則用 DEFAULT_MODEL）＋帳號方案。"""
-    return context_limit_for(state.model or DEFAULT_MODEL, _account_plan)
+    """該對話目前的 context 上限：依其生效模型（_eff_model）＋帳號方案。"""
+    return context_limit_for(_eff_model(state), _account_plan)
 
 # ── 開車模式持久化（語音輸入↔語音回覆的總開關）──────────────────────────────
 # 開車時 /drive on 載入 Whisper+XTTS、啟用「語音進→語音出」；在家 /drive off 全部卸載、
@@ -433,10 +463,9 @@ def get_state(cid: int) -> ChannelState:
             _cid=cid,
             cwd=cwd if cwd.is_dir() else DEFAULT_DIR,
             session_id=rec.get("session_id"),
-            # model 欄位存在（含明確的 None＝使用者選過「帳號預設」）就照存的用；
-            # 只有全新頻道／舊格式紀錄（無此欄位）才給 DEFAULT_MODEL——
-            # 否則 /model 選「預設」後一重啟就被悄悄改回 DEFAULT_MODEL，前後行為不一致
-            model=rec.get("model") if "model" in rec else DEFAULT_MODEL,
+            # model/effort 是「本對話覆寫」層（None＝跟隨帳號預設 _default_model/_default_effort）。
+            # 全新頻道自然是 None，會落到帳號預設或內建後備；生效值一律走 _eff_model/_eff_effort。
+            model=rec.get("model"),
             effort=rec.get("effort"),
             wt=wt_rec if isinstance(wt_rec, dict) else None,
         )
@@ -451,8 +480,8 @@ def _build_options(state: ChannelState) -> ClaudeAgentOptions:
     options = ClaudeAgentOptions(
         cwd=str(state.cwd),
         cli_path=CLAUDE_CLI,
-        model=state.model,
-        effort=state.effort,
+        model=_eff_model(state),
+        effort=_eff_effort(state),
         # 維持全放行（自動執行，不干擾工作流）。危險指令確認改掛 PreToolUse hook：
         # 實測 headless/SDK 下 can_use_tool 回呼不會被觸發，但 PreToolUse hook 即使在
         # bypassPermissions 也照樣觸發、且 permissionDecision="deny" 能真正擋下工具。
@@ -489,8 +518,9 @@ async def _drop_client(cid: int) -> None:
 
 def _client_sig(state: ChannelState) -> tuple:
     """長駐 client 的設定指紋（不含 session_id：sid 會在正常對話中由 client 自己產出）。
-    cwd／model／effort／開車模式／協作模式任一改變，即代表要用新設定重建 client。"""
-    return (str(state.cwd), state.model, state.effort,
+    cwd／生效 model／生效 effort／開車模式／協作模式任一改變，即代表要用新設定重建 client。
+    用生效值（含帳號預設層）：改帳號預設時，未單獨覆寫的對話下次對話會自動重建。"""
+    return (str(state.cwd), _eff_model(state), _eff_effort(state),
             _drive_mode, COORD_ENABLED)
 
 
@@ -1003,9 +1033,9 @@ async def run_claude(
         『在跑什麼＋當前思考/生成尾段』。原本這排在頂部，軌跡一長就要往上捲，故移到底。"""
         first = f"{icon} **{t('thinking_inline')}** `{elapsed}s`"
         if state._session_label:
-            _m = state.model
+            _m = _eff_model(state)
             _ms = _m.replace("claude-", "") if _m else t("default_inline")
-            _eff = state.effort or t("default_inline")
+            _eff = _eff_effort(state) or t("default_inline")
             first += f"　💬 `{state._session_label}`　🧠 `{_ms}·{_eff}`"
         lines = [first]
         # 本回合指令原文：讓使用者核對「在跑的是我給的指令」（防幻象／夾帶指令）
@@ -2062,8 +2092,8 @@ async def cmd_status(interaction: discord.Interaction) -> None:
         lines.append(t("status_worktree", branch=state.wt["branch"], base=state.wt["base"]))
     lines += [
         t("status_session", id=sid[:8]) if sid else t("status_session_none"),
-        t("status_model", model=state.model or t("default_inline"), fb=FALLBACK_MODEL),
-        t("status_effort", effort=state.effort or t("default_inline")),
+        t("status_model", model=_eff_model(state), fb=FALLBACK_MODEL),
+        t("status_effort", effort=_eff_effort(state) or t("default_inline")),
         t("status_context", bar=ctx_bar, ctx=f"{ctx:,}", limit=f"{ctx_limit:,}"),
     ]
     await interaction.response.send_message("\n".join(lines))
@@ -2369,11 +2399,31 @@ async def cmd_confirm(interaction: discord.Interaction, switch: str) -> None:
     discord.app_commands.Choice(name=t("choice_default"),                 value="default"),
 ])
 async def cmd_model(interaction: discord.Interaction, model: str) -> None:
+    # /model 設「帳號預設」：套用到所有未被 /model_session 單獨覆寫的對話
+    if not await check_auth(interaction): return
+    global _default_model
+    _default_model = None if model == "default" else model
+    _save_defaults()   # 立刻存檔，重啟後仍記得
+    # 生效值變動由 _client_sig 反映：未覆寫的對話下次對話時 client 指紋不符會自動重建
+    shown = DEFAULT_MODEL if model == "default" else model
+    await interaction.response.send_message(t("model_set", model=shown))
+
+@bot.tree.command(name="model_session", description=t("cmd_model_session_desc"))
+@discord.app_commands.choices(model=[
+    discord.app_commands.Choice(name=t("model_sonnet46"), value="claude-sonnet-4-6"),
+    discord.app_commands.Choice(name="Sonnet 4.5",          value="claude-sonnet-4-5"),
+    discord.app_commands.Choice(name="Opus 4.8",            value="claude-opus-4-8"),
+    discord.app_commands.Choice(name=t("model_haiku"),   value="claude-haiku-4-5-20251001"),
+    discord.app_commands.Choice(name=t("choice_follow_default"),          value="default"),
+])
+async def cmd_model_session(interaction: discord.Interaction, model: str) -> None:
+    # /model_session 只覆寫「這個對話」；None＝跟隨帳號預設。寫檔、重啟後仍保留
     if not await check_auth(interaction): return
     st = get_state(interaction.channel_id)
     st.model = None if model == "default" else model
-    _persist_session(st)   # 立刻存檔，重啟後仍記得
-    await interaction.response.send_message(t("model_set", model=model))
+    _persist_session(st)
+    shown = t("choice_follow_default") if model == "default" else model
+    await interaction.response.send_message(t("model_session_set", model=shown))
 
 @bot.tree.command(name="effort", description=t("cmd_effort_desc"))
 @discord.app_commands.choices(effort=[
@@ -2385,11 +2435,31 @@ async def cmd_model(interaction: discord.Interaction, model: str) -> None:
     discord.app_commands.Choice(name=t("choice_default"),        value="default"),
 ])
 async def cmd_effort(interaction: discord.Interaction, effort: str) -> None:
+    # /effort 設「帳號預設」思考程度
+    if not await check_auth(interaction): return
+    global _default_effort
+    _default_effort = None if effort == "default" else effort
+    _save_defaults()   # 立刻存檔，重啟後仍記得
+    shown = t("default_inline") if effort == "default" else effort
+    await interaction.response.send_message(t("effort_set", effort=shown))
+
+@bot.tree.command(name="effort_session", description=t("cmd_effort_session_desc"))
+@discord.app_commands.choices(effort=[
+    discord.app_commands.Choice(name=t("effort_low"), value="low"),
+    discord.app_commands.Choice(name="medium",      value="medium"),
+    discord.app_commands.Choice(name="high",        value="high"),
+    discord.app_commands.Choice(name="xhigh",       value="xhigh"),
+    discord.app_commands.Choice(name=t("effort_max"), value="max"),
+    discord.app_commands.Choice(name=t("choice_follow_default"),  value="default"),
+])
+async def cmd_effort_session(interaction: discord.Interaction, effort: str) -> None:
+    # /effort_session 只覆寫「這個對話」的思考程度；None＝跟隨帳號預設
     if not await check_auth(interaction): return
     st = get_state(interaction.channel_id)
     st.effort = None if effort == "default" else effort
-    _persist_session(st)   # 立刻存檔，重啟後仍記得
-    await interaction.response.send_message(t("effort_set", effort=effort))
+    _persist_session(st)
+    shown = t("choice_follow_default") if effort == "default" else effort
+    await interaction.response.send_message(t("effort_session_set", effort=shown))
 
 @bot.tree.command(name="plan", description=t("cmd_plan_desc"))
 @discord.app_commands.choices(plan=[
@@ -2639,7 +2709,7 @@ async def cmd_handoff(interaction: discord.Interaction) -> None:
         return
     await interaction.response.defer()
     await interaction.followup.send(t("handoff_generating"))
-    doc = await _generate_handoff(sid, state.model)
+    doc = await _generate_handoff(sid, _eff_model(state))
     if not doc:
         await interaction.followup.send(t("handoff_empty"))
         return

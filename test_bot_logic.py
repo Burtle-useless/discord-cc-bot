@@ -68,6 +68,28 @@ def test_context_limit_for() -> None:
     ok("context_limit_for 官方三規則")
 
 
+def test_effective_settings() -> None:
+    """model/effort 三層優先序：對話覆寫 → 帳號預設 → 內建後備（帳號預設功能的核心）。"""
+    prev_m, prev_e = d._default_model, d._default_effort
+    try:
+        st = d.ChannelState(_cid=1, cwd=d.DEFAULT_DIR)          # model/effort 皆 None＝未覆寫
+        # 無覆寫、無帳號預設 → 落到內建後備 DEFAULT_MODEL；effort 無預設＝None（SDK 預設）
+        d._default_model, d._default_effort = None, None
+        assert d._eff_model(st) == d.DEFAULT_MODEL
+        assert d._eff_effort(st) is None
+        # 設帳號預設、仍無覆寫 → 跟隨帳號預設
+        d._default_model, d._default_effort = "claude-opus-4-8", "high"
+        assert d._eff_model(st) == "claude-opus-4-8"
+        assert d._eff_effort(st) == "high"
+        # 對話覆寫存在 → 蓋過帳號預設
+        st.model, st.effort = "claude-haiku-4-5-20251001", "low"
+        assert d._eff_model(st) == "claude-haiku-4-5-20251001"
+        assert d._eff_effort(st) == "low"
+    finally:
+        d._default_model, d._default_effort = prev_m, prev_e
+    ok("_eff_model/_eff_effort 三層優先序")
+
+
 def test_chunk_text() -> None:
     """/search 索引切塊：空字串、單塊、多塊重疊。"""
     assert d._chunk_text("") == []
@@ -235,6 +257,7 @@ def test_bar_clamp() -> None:
 def main() -> None:
     test_classify_cc_error()
     test_context_limit_for()
+    test_effective_settings()
     test_chunk_text()
     test_needs_confirm()
     test_channel_naming()

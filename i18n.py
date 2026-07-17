@@ -205,14 +205,19 @@ _STRINGS: dict[str, dict[str, str]] = {
         "cmd_search_desc": "Search past conversations by meaning (semantic search)",
         "search_none": "🔍 No conversation mentions “{kw}”.",
         "search_header": "🔍 **Results for “{kw}”** ({n})",
-        "cmd_model_desc": "Pick the Claude model",
+        "cmd_model_desc": "Set the default Claude model (account-wide)",
         "model_sonnet46": "Sonnet 4.6 (recommended)",
         "model_haiku": "Haiku 4.5 (fast)",
-        "model_set": "✅ Model set to `{model}`",
-        "cmd_effort_desc": "Pick the thinking effort level",
+        "model_set": "✅ Default model: `{model}`  (use /model_session to override one chat)",
+        "cmd_model_session_desc": "Override the model for THIS chat only",
+        "model_session_set": "✅ This chat's model: `{model}`",
+        "cmd_effort_desc": "Set the default thinking effort (account-wide)",
         "effort_low": "low (fast)",
         "effort_max": "max (strongest)",
-        "effort_set": "✅ Effort set to `{effort}`",
+        "effort_set": "✅ Default effort: `{effort}`  (use /effort_session to override one chat)",
+        "cmd_effort_session_desc": "Override the thinking effort for THIS chat only",
+        "effort_session_set": "✅ This chat's effort: `{effort}`",
+        "choice_follow_default": "Follow account default",
         "cmd_plan_desc": "Set your Claude subscription plan (controls the 1M context window)",
         "plan_unknown": "Not sure / clear setting",
         "plan_set_auto": "✅ Plan set to `{plan}`. Opus now auto-uses the 1M context window; other models stay at 200K (add the `[1m]` alias when you need 1M).",
@@ -318,8 +323,8 @@ _STRINGS: dict[str, dict[str, str]] = {
             "`/search <query>` — find past conversations by meaning\n"
             "`/handoff` — generate a handoff brief to continue on another machine\n"
             "`/status` — current status\n"
-            "`/model` — pick the model\n"
-            "`/effort` — pick the thinking effort\n"
+            "`/model` · `/effort` — set the account-wide default model / effort\n"
+            "`/model_session` · `/effort_session` — override just this chat\n"
             "`/plan` — set your subscription plan (controls the 1M context window)\n"
             "`/drive on|off` — drive mode: voice in, voice out (loads/unloads local models)\n"
             "`/cd <path>` — change the working directory\n"
@@ -412,8 +417,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         "guide_model": (
             "📖 **Models & usage**\n"
             "\n"
-            "**Model**: `/model` — Sonnet (daily driver), Opus (strongest, heavier on quota), Haiku (fast). Each channel remembers its own setting across restarts.\n"
-            "**Effort**: `/effort` — low to max; higher thinks deeper but slower.\n"
+            "**Model**: `/model` sets the account-wide default — Sonnet (daily driver), Opus (strongest, heavier on quota), Haiku (fast). Use `/model_session` to override just the current chat (kept across restarts until you change it back).\n"
+            "**Effort**: `/effort` sets the default thinking effort (low to max; higher thinks deeper but slower); `/effort_session` overrides the current chat.\n"
             "**Plan**: `/plan` tells the bot your subscription so it applies the official 1M-context rule (automatic for Opus on Max/Team/Enterprise).\n"
             "**Quota**: `/usage` shows 5-hour and 7-day usage bars with reset countdowns.\n"
             "**Status**: `/status` shows conversation, directory, model, and a context usage bar at a glance.\n"
@@ -670,14 +675,19 @@ _STRINGS: dict[str, dict[str, str]] = {
         "cmd_search_desc": "依語意搜尋歷史對話（用大概意思找，免精準關鍵字）",
         "search_none": "🔍 找不到提到「{kw}」的對話。",
         "search_header": "🔍 **搜尋「{kw}」的結果**（{n} 筆）",
-        "cmd_model_desc": "選擇 Claude 模型",
+        "cmd_model_desc": "設定帳號預設 Claude 模型（所有對話通用）",
         "model_sonnet46": "Sonnet 4.6（推薦）",
         "model_haiku": "Haiku 4.5（快速）",
-        "model_set": "✅ 模型設為 `{model}`",
-        "cmd_effort_desc": "選擇思考程度",
+        "model_set": "✅ 帳號預設模型：`{model}`　（用 /model_session 可單獨覆寫某個對話）",
+        "cmd_model_session_desc": "只覆寫「這個對話」的模型",
+        "model_session_set": "✅ 這個對話的模型：`{model}`",
+        "cmd_effort_desc": "設定帳號預設思考程度（所有對話通用）",
         "effort_low": "low（快速）",
         "effort_max": "max（最強）",
-        "effort_set": "✅ 思考程度設為 `{effort}`",
+        "effort_set": "✅ 帳號預設思考程度：`{effort}`　（用 /effort_session 可單獨覆寫某個對話）",
+        "cmd_effort_session_desc": "只覆寫「這個對話」的思考程度",
+        "effort_session_set": "✅ 這個對話的思考程度：`{effort}`",
+        "choice_follow_default": "跟隨帳號預設",
         "cmd_plan_desc": "設定你的 Claude 訂閱方案（決定 1M context 視窗）",
         "plan_unknown": "不確定／清除設定",
         "plan_set_auto": "✅ 方案設為 `{plan}`。Opus 現在會自動使用 1M context；其他模型維持 200K（需要時在模型加 `[1m]` 後綴）。",
@@ -782,8 +792,8 @@ _STRINGS: dict[str, dict[str, str]] = {
             "`/search <查詢>` — 依語意搜尋歷史對話\n"
             "`/handoff` — 生成交接稿，換另一台電腦接手\n"
             "`/status` — 目前狀態\n"
-            "`/model` — 選擇模型\n"
-            "`/effort` — 選擇思考程度\n"
+            "`/model` · `/effort` — 設定帳號預設模型／思考程度\n"
+            "`/model_session` · `/effort_session` — 只覆寫目前這個對話\n"
             "`/plan` — 設定訂閱方案（決定 1M context 視窗）\n"
             "`/drive on|off` — 開車模式：語音進語音出（載入/卸載本機模型）\n"
             "`/cd <路徑>` — 切換工作目錄\n"
@@ -875,8 +885,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         "guide_model": (
             "📖 **模型與用量**\n"
             "\n"
-            "**換模型**：`/model` — Sonnet（日常推薦）、Opus（最強、較吃額度）、Haiku（快）。每個頻道記各自的設定，重啟不會忘。\n"
-            "**思考程度**：`/effort` — low 到 max，越高想得越深、也越慢。\n"
+            "**換模型**：`/model` 設帳號預設 — Sonnet（日常推薦）、Opus（最強、較吃額度）、Haiku（快）。用 `/model_session` 只覆寫目前這個對話（重啟仍保留，直到你改回）。\n"
+            "**思考程度**：`/effort` 設帳號預設（low 到 max，越高想得越深、也越慢）；`/effort_session` 只覆寫目前這個對話。\n"
             "**訂閱方案**：`/plan` 告訴 bot 你的方案，它會按官方規則決定 Opus 有沒有 1M context（Max／Team／Enterprise 自動有）。\n"
             "**額度**：`/usage` 看 5 小時與 7 天用量條、重置倒數。\n"
             "**目前狀態**：`/status` 一次看對話、目錄、模型、context 用量條。\n"
