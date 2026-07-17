@@ -136,6 +136,25 @@ def _append_user_ledger(channel_id: int, author: str, text: str) -> None:
     except Exception:
         pass
 
+
+def _read_user_ledger(channel_id: int, count: int) -> list[str]:
+    """讀原話帳本，回傳本頻道最近 count 則格式化字串（由舊到新），供 /recall 核對用。"""
+    if not _USER_LEDGER_FILE.exists():
+        return []
+    out: list[str] = []
+    try:
+        with _USER_LEDGER_FILE.open(encoding="utf-8") as f:
+            for line in f:
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                if rec.get("channel_id") == channel_id:
+                    out.append(f"[{rec.get('ts', '')}] {rec.get('author', '')}: {rec.get('text', '')}")
+    except Exception:
+        return []
+    return out[-count:]
+
 @dataclass(slots=True)
 class ChannelState:
     """一個頻道的會話狀態（原為 stringly-typed dict、欄位散落全檔）。
@@ -1377,19 +1396,22 @@ async def _handle_cc_error(prog: discord.Message, err: "CCError", state: Channel
     except Exception:
         pass
 
-async def _process_answer(channel: discord.TextChannel, chosen: str, state: ChannelState) -> None:
+async def _run_and_reply(channel: discord.TextChannel, send_text: str,
+                         prog_text: str, state: ChannelState) -> None:
+    """把一段文字送進當前 CC session、把回應貼回頻道（含過程軌跡、追問、錯誤處理）。
+    _process_answer（選項回答）與 /recall（記憶核對）共用此收尾邏輯，避免重複。"""
     if _processing.get(channel.id):
         await channel.send(t("still_processing"), delete_after=5)
         return
     _processing[channel.id] = True
-    prog = await channel.send(t("you_chose_thinking", chosen=chosen))
+    prog = await channel.send(prog_text)
     try:
-        reply, new_sid, next_ask = await _run_tracked(channel.id, chosen, state, prog)
+        reply, new_sid, next_ask = await _run_tracked(channel.id, send_text, state, prog)
         if new_sid:
             state.session_id = new_sid
             _persist_session(state)
         await prog.delete()
-        # 按鈕回答並非語音輸入，不合成語音；但仍過 _voice_reply 清掉可能殘留的朗讀標記
+        # 非語音輸入不合成語音；但仍過 _voice_reply 清掉可能殘留的朗讀標記
         if next_ask:
             # 先送出說明文字（思考結果），再送下一題問題按鈕
             if reply and reply != _NO_RESPONSE:
@@ -1407,6 +1429,10 @@ async def _process_answer(channel: discord.TextChannel, chosen: str, state: Chan
         await prog.edit(content=t("unexpected_error", detail=detail)[:2000])
     finally:
         _processing[channel.id] = False
+
+async def _process_answer(channel: discord.TextChannel, chosen: str, state: ChannelState) -> None:
+    # 選項回答：顯示「你選了 X」當過程訊息，實際送給 CC 的也是 chosen
+    await _run_and_reply(channel, chosen, t("you_chose_thinking", chosen=chosen), state)
 
 async def _send_ask_question(channel: discord.TextChannel, ask_data: dict, state: ChannelState) -> None:
     # Discord 一問一答架構一次只能收一題答案，多題會被吞掉；故一次只處理第一題（防呆）
@@ -2495,6 +2521,31 @@ async def cmd_drive(interaction: discord.Interaction, mode: str) -> None:
         # 只卸載 F5（語音回應）；語音輸入的 Whisper 交給閒置回收器自行釋放，不在此動它
         await asyncio.to_thread(drive_core.unload_f5tts)
         await interaction.response.send_message(t("drive_off"))
+
+@bot.tree.command(name="recall", description=t("cmd_recall_desc"))
+@discord.app_commands.describe(count=t("recall_count_desc"))
+async def cmd_recall(interaction: discord.Interaction, count: int = 20) -> None:
+    # 記憶核對：撈「原話帳本＋頻道歷史」兩份第一手紀錄，送進當前對話讓 CC 自我對照、抓幻覺
+    if not await check_auth(interaction): return
+    channel = interaction.channel
+    count = max(1, min(count, 100))
+    await interaction.response.send_message(t("recall_gathering", count=count))
+    # A. 原話帳本（只含使用者發言，本頻道最近 count 則）
+    ledger = _read_user_ledger(channel.id, count)
+    # B. 頻道歷史（含 bot 回覆，最近 count 則；history 由新到舊，reverse 成由舊到新，時間轉本地）
+    hist: list[str] = []
+    try:
+        async for m in channel.history(limit=count):
+            body = (m.content or "").replace("\n", " ").strip()
+            if body:
+                hist.append(f"[{m.created_at.astimezone():%m-%d %H:%M}] {m.author.display_name}: {body}")
+    except Exception:
+        pass
+    hist.reverse()
+    prompt = t("recall_prompt",
+               ledger="\n".join(ledger) or "(empty)",
+               history="\n".join(hist) or "(empty)")
+    await _run_and_reply(channel, prompt, t("recall_checking"), get_state(channel.id))
 
 @bot.tree.command(name="cd", description=t("cmd_cd_desc"))
 async def cmd_cd(interaction: discord.Interaction, path: str) -> None:

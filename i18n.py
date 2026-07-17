@@ -106,6 +106,21 @@ _STRINGS: dict[str, dict[str, str]] = {
         "official_status": "\n(official status: {inc})",
         # 回答處理
         "still_processing": "⏳ Still working, please try again shortly.",
+        "cmd_recall_desc": "Fact-check: compare the real chat log (your messages + channel history) against what I remember",
+        "recall_count_desc": "How many recent messages to pull (default 20)",
+        "recall_gathering": "🔍 Pulling the last {count} messages (ledger + channel history) for a reality check...",
+        "recall_checking": "🔍 **Comparing the records against my memory...**",
+        "recall_prompt": (
+            "[Reality check] The user wants you to check yourself for memory drift or hallucination. "
+            "Below are two first-hand, uncompressed records.\n\n"
+            "1. User message ledger (auto-saved by the bot, only the user's own messages):\n{ledger}\n\n"
+            "2. Discord channel history (includes your replies, oldest to newest):\n{history}\n\n"
+            "Go through what you currently believe the user said or asked for, and point out explicitly: "
+            "(1) where you misremembered or misunderstood; (2) things you thought the user said but are NOT "
+            "in the records (hallucination); (3) important instructions you missed. Where your understanding "
+            "matches, note it briefly; if there is no significant discrepancy overall, say so plainly. "
+            "Don't be sycophantic, don't re-run any task, just report the comparison."
+        ),
         "you_chose_thinking": "✅ You chose: **{chosen}**\n⏳ **Thinking...**",
         "stopped": "🛑 Stopped",
         "unexpected_error": "❌ Unexpected error.\n```\n{detail}\n```",
@@ -585,6 +600,19 @@ _STRINGS: dict[str, dict[str, str]] = {
         "session_auto_cleared": "\n（已自動清除 session，下一則訊息會開新對話）",
         "official_status": "\n（官方狀態：{inc}）",
         "still_processing": "⏳ 還在處理中，請稍後再試。",
+        "cmd_recall_desc": "核對：拿真實對話紀錄（你的原話＋頻道歷史）比對我的記憶，抓幻覺",
+        "recall_count_desc": "要撈最近幾則訊息（預設 20）",
+        "recall_gathering": "🔍 正在撈取最近 {count} 則（原話帳本＋頻道歷史）來核對...",
+        "recall_checking": "🔍 **正在拿紀錄跟我的記憶比對...**",
+        "recall_prompt": (
+            "【真實紀錄核對】使用者要你檢查自己有沒有記憶偏差或幻覺。以下是兩份未經壓縮的第一手紀錄。\n\n"
+            "一、使用者原話帳本（bot 自動存檔，只含使用者本人的發言）：\n{ledger}\n\n"
+            "二、Discord 頻道歷史（含你的回覆，由舊到新）：\n{history}\n\n"
+            "請逐條對照你目前 context／記憶中「使用者說過什麼、要求過什麼」，明確指出："
+            "(1) 你記錯或誤解的地方；(2) 你以為使用者說過、但紀錄裡其實沒有的內容（幻覺）；"
+            "(3) 你遺漏的重要指示。若某處理解與紀錄相符，簡短帶過；若整體無明顯落差，直說「無明顯落差」。"
+            "不要客套、不要重新執行任務，只做核對回報。"
+        ),
         "you_chose_thinking": "✅ 你選了：**{chosen}**\n⏳ **思考中...**",
         "stopped": "🛑 已停止",
         "unexpected_error": "❌ 發生未預期錯誤。\n```\n{detail}\n```",
