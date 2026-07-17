@@ -501,11 +501,6 @@ def _build_options(state: ChannelState) -> ClaudeAgentOptions:
     )
     # 開啟逐字串流，讓生成中的回應能即時顯示在「思考中」訊息，提供存活訊號
     options.include_partial_messages = True
-    # 讓 Opus（4.7 起 API 預設 thinking.display=omitted，只回空思考殼＋加密簽章、
-    # 無 thinking_delta）也吐出思考明文：透過 CLI flag --thinking-display summarized
-    # 繞過。SDK 尚未把 thinking.display 轉發到 CLI（見 anthropics/claude-agent-sdk-python#831），
-    # 故走 extra_args。對 Sonnet 無害（本就 summarized），實測 Opus 4.8 direct path 有效。
-    options.extra_args = {**(options.extra_args or {}), "thinking-display": "summarized"}
     return options
 
 
@@ -983,7 +978,6 @@ async def run_claude(
     start = time.time()
     pending_question: dict = {}
     live_text: str = ""  # 生成中累積的回應文字（底部狀態列即時顯示尾段）
-    live_think: str = ""  # 生成中累積的思考內容（thinking_delta，底部狀態列即時顯示尾段）
     cur_msg = progress_msg           # 當前正在往下寫的過程訊息（撞 2000 上限會換新的一則）
     state._live_msg = progress_msg   # 同步給 on_message：錯誤路徑要在這則上顯示錯誤
     last_activity = [time.time()]  # CC 最後一次有輸出的時間（閒置逾時判斷用）
@@ -993,35 +987,27 @@ async def run_claude(
 
     def _commit_step(am) -> None:
         """把一個 AssistantMessage 定稿成軌跡的一段（往下累積、不覆蓋）：
-        思考→摘要一行、工具→_fmt_tool、過場白→💭第一行。純正式回應（無思考無工具）
-        不進軌跡，交給最後的 reply 呈現，避免同一段文字重複出現兩次。"""
-        nonlocal trace, pending_question, tool_count, live_text, live_think
+        工具→_fmt_tool、動手前的中文過場白→💭。只有「這步動了工具」才進軌跡；
+        純文字回應（無工具）留給最後的 reply 呈現，避免同一段文字重複出現兩次。"""
+        nonlocal trace, pending_question, tool_count, live_text
         content = getattr(am, "content", [])
         if not isinstance(content, list):
             return
         has_tool = any(isinstance(b, ToolUseBlock) for b in content)
-        has_think = any(getattr(b, "thinking", None) for b in content)
-        if not (has_tool or has_think):
-            return                      # 純正式回應：留給 reply，不重複進軌跡
+        if not has_tool:
+            return                      # 無工具（純思考／純正式回應）：留給 reply，不進軌跡
         lines: list[str] = []
         for block in content:
-            think = getattr(block, "thinking", None)
-            if think:
-                s = think.strip().replace("\n", " ")
-                if s:
-                    lines.append(f"🧠 {s[:120]}")
-            elif isinstance(block, ToolUseBlock):
+            if isinstance(block, ToolUseBlock):
                 name = block.name
                 inp = getattr(block, "input", {}) or {}
                 if name == "AskUserQuestion":
                     pending_question = inp
                 lines.append(_fmt_tool(name, inp))
                 tool_count += 1
-            elif has_tool and hasattr(block, "text"):
-                # 只有「這步真的動了工具」才把過場白放進軌跡；無工具步的 text 可能是最終回應，
-                # 留給 reply 呈現，避免同一句在軌跡與回應各出現一次。有工具的訊息裡的 text 一定是
-                # 「動手前的中文說明」（這一步在做什麼、為什麼），完整保留（截到 400 字防軌跡爆長、
-                # 保留換行），讓使用者看清每一步的意圖，而不只第一行。
+            elif hasattr(block, "text"):
+                # 有工具的訊息裡的 text 一定是「動手前的中文說明」（這一步在做什麼、為什麼），
+                # 完整保留（截到 400 字防軌跡爆長、保留換行），讓使用者看清每一步的意圖。
                 txt = (block.text or "").strip()
                 if txt and not txt.startswith("["):
                     lines.append(f"💭 {txt[:400]}")
@@ -1029,7 +1015,6 @@ async def run_claude(
             trace += ("\n" if trace else "") + "\n".join(lines)
         # 這步已定稿進軌跡 → 清即時尾段，下一步重新累積
         live_text = ""
-        live_think = ""
 
     _spinner = ["🌑","🌒","🌓","🌔","🌕","🌖","🌗","🌘"]
 
@@ -1046,10 +1031,6 @@ async def run_claude(
         # 本回合指令原文：讓使用者核對「在跑的是我給的指令」（防幻象／夾帶指令）
         if _cmd_disp:
             lines.append(f"📥 `{_cmd_disp}`")
-        # 即時思考尾段：讓使用者看到「這一步正在想什麼」（存活訊號之一）
-        if live_think:
-            _tk = live_think[-180:].replace("\n", " ")
-            lines.append(f"🧠 {_tk}")
         # 生成階段：回應字數 + 即時文字尾段，作為「還活著」的存活訊號
         if live_text:
             _tx = live_text[-180:].replace("\n", " ")
@@ -1098,7 +1079,7 @@ async def run_claude(
     messages = []
 
     async def _run_client() -> None:
-        nonlocal live_text, live_think
+        nonlocal live_text
         try:
             client = await _acquire_client(state)   # 長駐：取池中 client，無則新建連線
             await client.query(prompt)
@@ -1112,8 +1093,6 @@ async def run_claude(
                         dt = delta.get("type")
                         if dt == "text_delta":
                             live_text += delta.get("text", "")
-                        elif dt == "thinking_delta":
-                            live_think += delta.get("thinking", "")
                     continue
                 messages.append(message)
                 if isinstance(message, ResultMessage):
