@@ -940,6 +940,10 @@ async def _generate_title(session_id: str) -> Optional[str]:
     raw = await _ask_haiku(t("title_prompt") + text)
     title = (raw or "").strip().splitlines()[0] if raw else ""
     title = title.strip('「」"\'*#＊ 　')[:40]   # 去掉引號、markdown 符號、前後空白
+    # 防呆：錯誤訊息不准當標題——回合失敗時 session 內容就是錯誤文字，曾把
+    # 「Failed to authenticate. API Error: 401」存成標題＋頻道名（2026-07-21 實案）
+    if title and re.search(r"(?i)failed to authenticate|api error|oauth|\b401\b", title):
+        return None
     return title or None
 
 async def _generate_handoff(session_id: str, model: Optional[str]) -> Optional[str]:
