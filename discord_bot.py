@@ -49,6 +49,15 @@ try:
 except ImportError:
     pass
 
+# 洗掉「上層 Claude session 洩漏的環境變數」：若 bot 是從桌面 app 的 CC 殼重啟的，
+# 會繼承 ANTHROPIC_BASE_URL（指向 app 的本機代理）與 CLAUDE_CODE_* 等 session 變數，
+# CC 子進程因此改走別人的短命憑證，token 一輪換就整批 401、重新登入也救不回
+# （2026-07-21 實案）。開機即清，CC 一律用本機 claude 登入憑證，不受啟動來源污染。
+for _k in [k for k in os.environ
+           if k in ("ANTHROPIC_BASE_URL", "CLAUDECODE", "CLAUDE_AGENT_SDK_VERSION")
+           or k.startswith("CLAUDE_CODE_")]:
+    os.environ.pop(_k, None)
+
 # ── 介面語言（i18n）：字串集中在 i18n.py（en / zh-TW）─────────────────────
 from i18n import BOT_LANG, t
 
