@@ -254,6 +254,39 @@ def test_bar_clamp() -> None:
     ok("_bar 進度條 0..100 與超量/負值 clamp")
 
 
+def test_fmt_tool_display() -> None:
+    """⚠️ 只標真破壞性（與確認按鈕同一套 _DESTRUCTIVE_RE 判準，不受 /confirm 開關影響）；
+    Bash/PowerShell 優先顯示 CC 附的意圖說明（description）、原始指令縮短附後。"""
+    assert "⚠️" not in d._fmt_tool("PowerShell", {"command": "Get-ChildItem C:\\tmp"})
+    assert "⚠️" in d._fmt_tool("Bash", {"command": "rm -rf /tmp/x"})
+    assert "⚠️" in d._fmt_tool("PowerShell", {"command": "Remove-Item a.txt"})
+    assert "⚠️" not in d._fmt_tool("Write", {"file_path": "C:\\a\\b.py"})   # 改檔不再掛警示
+    line = d._fmt_tool("PowerShell", {"command": "python build.py", "description": "執行整合建置腳本"})
+    assert "執行整合建置腳本" in line and "python build.py" in line
+    assert line.index("執行整合建置腳本") < line.index("python build.py")   # 順序釘死：說明在前、指令在後
+    assert "python --version" in d._fmt_tool("Bash", {"command": "python --version"})  # 無說明退回指令
+    long_cmd = "x" * 200
+    assert "x" * 120 in d._fmt_tool("Bash", {"command": long_cmd})           # 無說明：指令截 120
+    assert "x" * 121 not in d._fmt_tool("Bash", {"command": long_cmd})
+    both = d._fmt_tool("Bash", {"command": long_cmd, "description": "d" * 100})
+    assert "d" * 80 in both and "d" * 81 not in both                         # 有說明：說明截 80
+    assert "x" * 80 in both and "x" * 81 not in both                         # 指令縮到 80
+    ok("_fmt_tool 危險判準收斂與 description 顯示（含順序與截斷）")
+
+
+def test_append_trace_line() -> None:
+    """連續相同的工具行合併成 ×N 不洗版；不同行照常換行累積。"""
+    tr = ""
+    for _ in range(5):
+        tr = d._append_trace_line(tr, "📖 **Read**  `a.txt`")
+    assert tr == "📖 **Read**  `a.txt` ×5"
+    tr = d._append_trace_line(tr, "✏️ **Edit**  `b.py`")
+    assert tr == "📖 **Read**  `a.txt` ×5\n✏️ **Edit**  `b.py`"
+    tr = d._append_trace_line(tr, "✏️ **Edit**  `b.py`")
+    assert tr.endswith("`b.py` ×2")
+    ok("_append_trace_line 重複合併 ×N")
+
+
 def main() -> None:
     test_classify_cc_error()
     test_context_limit_for()
@@ -267,6 +300,8 @@ def main() -> None:
     test_channel_state()
     test_purge_title_shell()
     test_bar_clamp()
+    test_fmt_tool_display()
+    test_append_trace_line()
     print(f"✅ 全部通過（{passed} 項）")
 
 

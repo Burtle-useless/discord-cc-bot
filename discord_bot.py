@@ -590,17 +590,22 @@ _ICONS = {
 }
 
 # 危險動作：會改檔案或執行系統指令的工具，在思考訊息裡要醒目標出並顯示完整內容
-_DANGER_TOOLS = {"Bash", "PowerShell", "Write", "Edit", "MultiEdit"}
-
 def _fmt_tool(name: str, inp: dict) -> str:
     icon = _ICONS.get(name, "🔧")
-    danger = name in _DANGER_TOOLS
+    # ⚠️ 只標「真破壞性」：與危險確認按鈕同一套 _DESTRUCTIVE_RE 判準（不受 /confirm
+    # 開關影響）。先前 Bash/PowerShell/Write/Edit 一律掛 ⚠️，每行都警示＝沒有警示。
+    danger = (name in ("Bash", "PowerShell")
+              and bool(_DESTRUCTIVE_RE.search(str(inp.get("command", "")))))
     if name in ("Write", "Edit", "MultiEdit") and "file_path" in inp:
         detail = inp["file_path"]                          # 改檔：顯示完整路徑，看清動的是哪個檔
     elif name in ("Read", "Glob") and "file_path" in inp:
         detail = Path(inp["file_path"]).name
     elif name in ("Bash", "PowerShell") and "command" in inp:
-        detail = inp["command"][:120].replace("\n", " ")   # 執行指令：顯示更完整的指令內容
+        # 優先顯示 CC 對這條指令附的意圖說明（description，介面語言）——「這一步在做
+        # 什麼」從此有確定性保底，不依賴 CC 在訊息裡開金口；原始指令縮短附後供核對。
+        cmd = str(inp["command"]).replace("\n", " ")
+        desc = str(inp.get("description") or "").strip().replace("\n", " ")
+        detail = f"{desc[:80]} · {cmd[:80]}" if desc else cmd[:120]
     elif name == "Grep" and "pattern" in inp:
         detail = inp["pattern"][:50]
     elif name == "WebSearch" and "query" in inp:
@@ -611,6 +616,18 @@ def _fmt_tool(name: str, inp: dict) -> str:
     if danger:                                             # 危險動作用 ⚠️ 標出，讓使用者一眼分辨
         return f"⚠️ {icon} **{name}**  `{detail}`" if detail else f"⚠️ {icon} **{name}**"
     return f"{icon} **{name}**  `{detail}`" if detail else f"{icon} **{name}**"
+
+def _append_trace_line(trace: str, line: str) -> str:
+    """軌跡追加一行：與最後一行相同（忽略既有 ×N 計數）就合併成計數，否則換行附加。
+    同一動作連續重複（如同一檔案連讀多次）不再洗版。"""
+    if not trace:
+        return line
+    head, sep, last = trace.rpartition("\n")
+    m = re.fullmatch(r"(.*?)(?: ×(\d+))?", last, re.DOTALL)
+    base, n = m.group(1), int(m.group(2) or 1)
+    if base == line:
+        return f"{head}{sep}{base} ×{n + 1}"
+    return f"{trace}\n{line}"
 
 # ── 危險指令確認（第二階段）──────────────────────────────────────────────
 # 逾時秒數（逾時＝取消不執行）。刻意小於 INACTIVITY_TIMEOUT，確認期間才不會被誤判卡死。
@@ -645,7 +662,11 @@ def _needs_confirm(tool_name: str, tool_input: dict) -> bool:
 async def _confirm_dangerous(channel: discord.TextChannel, tool_name: str,
                              tool_input: dict) -> Optional[bool]:
     """送出危險動作確認按鈕並等待回應。回傳 True=執行／False=取消／None=逾時。永不拋例外。"""
-    detail = _fmt_tool(tool_name, tool_input)
+    # 確認提示必須讓使用者核對「原始指令全文」，不能用 _fmt_tool 的縮短版——
+    # 攻擊面正是「說明講 A、指令做 B」，description 一長就把破壞性尾段推出視野。
+    raw = str(tool_input.get("command", ""))[:500].replace("```", "'''")
+    detail = (f"⚙️ **{tool_name}**\n```\n{raw}\n```" if raw
+              else _fmt_tool(tool_name, tool_input))
     mins = max(1, _CONFIRM_TIMEOUT_SEC // 60)
     prompt = t("confirm_prompt", detail=detail, mins=mins)
     result: dict = {"v": None}
@@ -1038,8 +1059,9 @@ async def run_claude(
                 txt = (block.text or "").strip()
                 if txt and not txt.startswith("["):
                     lines.append(f"💭 {txt[:400]}")
-        if lines:
-            trace += ("\n" if trace else "") + "\n".join(lines)
+        for ln in lines:
+            # 逐行併入軌跡：連續重複的同一動作合併成 ×N（見 _append_trace_line）
+            trace = _append_trace_line(trace, ln)
         # 這步已定稿進軌跡 → 清即時尾段，下一步重新累積
         live_text = ""
 
