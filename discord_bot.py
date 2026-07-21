@@ -1597,6 +1597,38 @@ def fetch_usage() -> Optional[dict]:
     except Exception:
         return None
 
+async def _update_profile_usage() -> None:
+    """抓方案用量寫進應用程式簡介（About Me，PATCH /applications/@me）：
+    點開 bot 頭像即可看 5 小時／週限額，不必打 /usage。失敗靜默，下輪再試。"""
+    data = await asyncio.to_thread(fetch_usage)
+    if not data:
+        return
+    lines = [t("profile_usage_title")]
+    for key, label in [("five_hour", t("usage_5h")), ("seven_day", t("usage_7d")),
+                        ("seven_day_sonnet", t("usage_7d_sonnet")), ("seven_day_opus", t("usage_7d_opus"))]:
+        obj = data.get(key)
+        if not obj:
+            continue
+        pct = obj.get("utilization")
+        if pct is None:
+            pct = obj.get("percent_used", 0)
+        lines.append(t("profile_usage_line", label=label, pct=f"{pct:.0f}",
+                       countdown=_countdown(obj.get("resets_at", ""))))
+    lines.append(t("profile_usage_updated", hhmm=datetime.now().strftime("%H:%M")))
+    await bot.http.request(discord.http.Route("PATCH", "/applications/@me"),
+                           json={"description": "\n".join(lines)[:390]})
+
+_PROFILE_USAGE_SEC = 600   # 簡介用量更新間隔（fetch_usage 本身另有 API 快取）
+
+async def _profile_usage_loop() -> None:
+    """每 10 分鐘把最新方案用量寫進 bot 簡介。"""
+    while True:
+        try:
+            await _update_profile_usage()
+        except Exception:
+            pass
+        await asyncio.sleep(_PROFILE_USAGE_SEC)
+
 def _bar(pct: float, w: int = 14) -> str:
     f = max(0, min(w, round(pct/100*w)))   # 夾在 0..w：用量超過上限時避免負數 padding 讓進度條變形
     return "█"*f + "░"*(w-f)
@@ -2025,6 +2057,7 @@ async def on_ready() -> None:
     asyncio.create_task(_schedule_loop())
     asyncio.create_task(_client_reaper())   # 長駐 client 閒置回收（A'）
     asyncio.create_task(_whisper_reaper())  # 語音輸入常駐：Whisper 閒置回收釋放 VRAM（顧遊戲）
+    asyncio.create_task(_profile_usage_loop())  # 方案用量寫進簡介（About Me），點頭像即看
     # 語音輸入已與開車模式解耦、永遠可用，Whisper 隨用隨載＋閒置卸載，故開機不預載。
     # 開車模式現在只管語音回應（F5/TTS）：上次關機時若為開啟，重啟自動恢復預載 F5。
     if _drive_mode and drive_core:
