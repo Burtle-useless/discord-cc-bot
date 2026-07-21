@@ -510,13 +510,21 @@ def _build_options(state: ChannelState) -> ClaudeAgentOptions:
                                           hooks=[_make_pretool_hook(state)])]},
         fallback_model=FALLBACK_MODEL,
         max_buffer_size=MAX_BUFFER_SIZE,
-        # 此 system_prompt 會透過管線傳給 CC 子進程。實測在 Windows 上，內含 LaTeX
+        # system_prompt 用 preset+append：bot 規則以 --append-system-prompt「疊加」在
+        # Claude Code 完整預設 prompt 之上，保留預設行為框架與 CLAUDE.md 的開場注入。
+        # 先前傳純字串會整份「取代」預設 prompt，bot 端 CC 因此缺所有預設行為規則，
+        # 只剩碰運氣的 nested-memory 附帶、壓縮後歸零。
+        # append 內容仍透過管線傳給 CC 子進程。實測在 Windows 上，內含 LaTeX
         # 錢字號、反引號、或無法用系統編碼表示的 Unicode 數學符號時，會讓 init 的控制
         # 訊息損毀，導致 initialize 卡死。故一律「用文字描述規則」，不嵌入危險字元本身。
         # 啟用協作時附加 coord_rule、開車模式附加 drive_rule（皆不含危險字元）。
-        system_prompt=t("system_prompt")
-        + (t("coord_rule") if COORD_ENABLED else "")
-        + (t("drive_rule") if (_drive_mode and drive_core) else ""),
+        system_prompt={
+            "type": "preset",
+            "preset": "claude_code",
+            "append": t("system_prompt")
+            + (t("coord_rule") if COORD_ENABLED else "")
+            + (t("drive_rule") if (_drive_mode and drive_core) else ""),
+        },
     )
     # 開啟逐字串流，讓生成中的回應能即時顯示在「思考中」訊息，提供存活訊號
     options.include_partial_messages = True
@@ -2403,6 +2411,8 @@ async def cmd_confirm(interaction: discord.Interaction, switch: str) -> None:
 @bot.tree.command(name="model", description=t("cmd_model_desc"))
 @discord.app_commands.choices(model=[
     discord.app_commands.Choice(name=t("model_sonnet46"), value="claude-sonnet-4-6"),
+    discord.app_commands.Choice(name="Sonnet 5",            value="claude-sonnet-5"),
+    discord.app_commands.Choice(name="Fable 5",             value="claude-fable-5"),
     discord.app_commands.Choice(name="Sonnet 4.5",          value="claude-sonnet-4-5"),
     discord.app_commands.Choice(name="Opus 4.8",            value="claude-opus-4-8"),
     discord.app_commands.Choice(name=t("model_haiku"),   value="claude-haiku-4-5-20251001"),
@@ -2421,6 +2431,8 @@ async def cmd_model(interaction: discord.Interaction, model: str) -> None:
 @bot.tree.command(name="model_session", description=t("cmd_model_session_desc"))
 @discord.app_commands.choices(model=[
     discord.app_commands.Choice(name=t("model_sonnet46"), value="claude-sonnet-4-6"),
+    discord.app_commands.Choice(name="Sonnet 5",            value="claude-sonnet-5"),
+    discord.app_commands.Choice(name="Fable 5",             value="claude-fable-5"),
     discord.app_commands.Choice(name="Sonnet 4.5",          value="claude-sonnet-4-5"),
     discord.app_commands.Choice(name="Opus 4.8",            value="claude-opus-4-8"),
     discord.app_commands.Choice(name=t("model_haiku"),   value="claude-haiku-4-5-20251001"),
