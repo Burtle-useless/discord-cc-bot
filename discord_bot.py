@@ -3054,6 +3054,15 @@ async def on_message(message: discord.Message) -> None:
             # 更新標題與 bot 狀態（新對話此時才有 session 檔可讀標題）
             state._session_label = await asyncio.to_thread(_session_label, new_sid)
             await _update_presence(message.channel.id, state._session_label)
+        # 空回應自動補刀（#50597 家族：模型只產思考塊、一個字不寫就 end_turn）：
+        # 用明確指令在同一 session 補跑一回合，一次為限；再空才放棄
+        if reply == _NO_RESPONSE and not ask_data:
+            retry_msg = await message.channel.send(t("thinking"))
+            reply, sid2, ask_data = await _run_tracked(
+                message.channel.id, t("empty_retry_nudge"), state, retry_msg)
+            if sid2:
+                state.session_id = sid2
+                _persist_session(state)
         # 過程軌跡訊息已由 run_claude 收尾（有軌跡＝定稿保留、無軌跡＝自刪），這裡不再刪除
         if ask_data:
             # 先送出「問題前的說明文字（思考結果）」，再送問題按鈕；
