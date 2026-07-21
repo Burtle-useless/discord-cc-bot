@@ -1414,6 +1414,10 @@ async def _handle_cc_error(prog: discord.Message, err: "CCError", state: Channel
         _persist_session(state)
         await _drop_client(state._cid)   # session 已失效，關掉長駐 client（A'）
         msg += t("session_auto_cleared")
+    if err.kind == "AUTH":
+        # 401 多半是「長駐 client 用過期憑證出生」：重新登入後舊進程不會撿新權杖、
+        # 會永遠 401。直接丟棄 client 讓下一則訊息以新憑證重生（session 保留不中斷）。
+        await _drop_client(state._cid)
     if err.kind == "OVERLOADED":
         inc = await asyncio.to_thread(is_incident_active)
         if inc:
