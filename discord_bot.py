@@ -269,7 +269,7 @@ def _ctx_limit(state: ChannelState) -> int:
     return context_limit_for(_eff_model(state), _account_plan)
 
 # ── 開車模式持久化（語音輸入↔語音回覆的總開關）──────────────────────────────
-# 開車時 /drive on 載入 Whisper+XTTS、啟用「語音進→語音出」；在家 /drive off 全部卸載、
+# 開車時 /drive on 載入 Whisper+F5-TTS、啟用「語音進→語音出」；在家 /drive off 全部卸載、
 # 釋放 VRAM，回到純文字 bot。全域設定（同一個 bot 一個開關），仿帳號方案存一份。
 # 預設 False（在家、不吃效能）。
 _DRIVE_FILE = _BOT_DIR / "drive_mode.json"

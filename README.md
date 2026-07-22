@@ -175,6 +175,19 @@ To run it **silently in the background** (no console window), double-click
 to **Start / Stop / Restart** the bot and **View Log** — no command line needed.
 It shows a live running/stopped status and works from the project folder.
 
+**Crash self-heal (optional, watchdog):** register a scheduled task that checks
+every 5 minutes and relaunches the bot if it died unexpectedly:
+
+```
+schtasks /create /tn ccbot-watchdog /sc minute /mo 5 /tr "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File <FULL-PATH-TO>\watchdog.ps1"
+```
+
+(If your project path contains spaces, create the task via the Task Scheduler
+GUI instead — `schtasks /tr` quoting is fragile.) The bot arms the watchdog on
+every startup by creating a `watchdog_enabled` marker file. To stop the bot
+**without** it being auto-revived, double-click `stop_bot.vbs` — it disarms the
+watchdog first, then kills the bot. Any normal start re-arms it automatically.
+
 > **Won't start, and the log is empty?** The launcher needs a working Python with
 > the dependencies. It looks for a virtualenv named `.venv` or `venv` in the
 > project folder, and otherwise falls back to the `py` launcher. Make sure you
