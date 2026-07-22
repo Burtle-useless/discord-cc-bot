@@ -571,6 +571,8 @@ def _client_sig(state: ChannelState) -> tuple:
             _drive_mode, COORD_ENABLED)
 
 
+MAX_CLIENTS = 8   # 長駐 client 進程數上限：超過先淘汰最久未用者，防頻道多開時進程無上限堆積
+
 async def _acquire_client(state: ChannelState) -> "ClaudeSDKClient":
     """取得該頻道的長駐 client；無、或設定指紋已變，則（丟棄後）新建並連線。
     首次連線才帶 resume 接回舊 session；之後同一 client 多輪都在同進程同 session。"""
@@ -581,6 +583,10 @@ async def _acquire_client(state: ChannelState) -> "ClaudeSDKClient":
         return c
     if c is not None:                 # 設定已變 → 丟棄舊 client，用新設定重建
         await _drop_client(cid)
+    # 進程池上限：滿了先淘汰最久未用的 client（LRU）。session 不受影響，被淘汰的
+    # 頻道下次有訊息時自動 resume 接回，只是多付一次進程啟動時間。
+    while len(_clients) >= MAX_CLIENTS and _client_used:
+        await _drop_client(min(_client_used, key=_client_used.get))
     options = _build_options(state)
     if state.session_id:
         options.resume = state.session_id   # 僅首次連線需要接回
@@ -661,21 +667,26 @@ _DESTRUCTIVE_RE = re.compile(
     r"\bremove-item\b|\bformat\s|\bmkfs\b|\bdd\s+if=|"
     r"\bgit\s+push\b|\bgit\s+reset\s+--hard\b|\bgit\s+clean\s+-|\bgit\s+checkout\s+--\s|\bgit\s+branch\s+-D\b|"
     r"\bshutdown\b|\brestart-computer\b|\bstop-computer\b|\btaskkill\b|\bstop-process\b|\bstop-service\b|"
-    r"\breg\s+delete\b|\bdiskpart\b|\bsc\s+delete\b|\bcipher\s+/w)",
+    r"\breg\s+delete\b|\bdiskpart\b|\bsc\s+delete\b|\bcipher\s+/w|"
+    # 編碼／下載執行類繞過載體：iex、-enc(odedcommand)、base64 解碼、下載即跑管道。
+    # 仍是黑名單、擋常見偽裝不擋決心；bare -e 刻意不攔（grep -e 等誤殺率太高）。
+    r"\biex\b|\binvoke-expression\b|-encodedcommand\b|-enc\b|\bfrombase64string\b|\bdownloadstring\b|"
+    r"\bcurl\b[^|\n]*\|\s*(?:sh|bash|iex)\b|\biwr\b[^|\n]*\|\s*iex\b|\bwget\b[^|\n]*\|\s*(?:sh|bash)\b)",
     re.IGNORECASE,
 )
 
 
 def _needs_confirm(tool_name: str, tool_input: dict) -> bool:
     """判斷這次工具呼叫是否為需確認的破壞性動作。只比對會執行任意系統指令的
-    Bash/PowerShell（惡意夾帶／幻象指令的主要途徑）。判斷出錯時放行，不阻斷 CC。"""
+    Bash/PowerShell（惡意夾帶／幻象指令的主要途徑）。判斷出錯時視同危險、攔下確認
+    （fail-closed）：寧可多按一次按鈕，不讓「弄壞判斷函式」變成解除安全鎖的後門。"""
     if not _CONFIRM_ENABLED:            # 總開關關閉時一律放行（由 /confirm 或 CONFIRM_DANGEROUS 控制）
         return False
     try:
         if tool_name in ("Bash", "PowerShell"):
             return bool(_DESTRUCTIVE_RE.search(str(tool_input.get("command", ""))))
     except Exception:
-        return False
+        return True                     # fail-closed：判斷出錯視同危險
     return False
 
 
