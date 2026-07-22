@@ -2069,6 +2069,12 @@ async def on_ready() -> None:
     asyncio.create_task(_client_reaper())   # 長駐 client 閒置回收（A'）
     asyncio.create_task(_whisper_reaper())  # 語音輸入常駐：Whisper 閒置回收釋放 VRAM（顧遊戲）
     asyncio.create_task(_profile_usage_loop())  # 方案用量寫進簡介（About Me），點頭像即看
+    # watchdog 開關檔：bot 正常上線＝武裝看門狗（排程每 5 分鐘跑 watchdog.ps1，死了自動拉活）；
+    # stop_bot.vbs 會先刪此檔再殺進程，故意關機不會被詐屍。
+    try:
+        (Path(__file__).parent / "watchdog_enabled").touch()
+    except Exception:
+        pass
     # 語音輸入已與開車模式解耦、永遠可用，Whisper 隨用隨載＋閒置卸載，故開機不預載。
     # 開車模式現在只管語音回應（F5/TTS）：上次關機時若為開啟，重啟自動恢復預載 F5。
     if _drive_mode and drive_core:
