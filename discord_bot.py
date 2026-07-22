@@ -58,6 +58,17 @@ for _k in [k for k in os.environ
            or k.startswith("CLAUDE_CODE_")]:
     os.environ.pop(_k, None)
 
+def _atomic_write_text(path: Path, text: str, encoding: Optional[str] = None) -> None:
+    """原子寫入：先寫同目錄唯一暫存檔、再 os.replace 原子換上——寫入途中崩潰／斷電
+    不再留下半截 JSON（session、白名單、排程等狀態檔都吃這條）。
+    encoding=None 維持平台預設編碼，與原本 write_text 的行為一致。"""
+    tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex[:6]}.tmp")
+    try:
+        tmp.write_text(text, encoding=encoding)
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
 # ── 介面語言（i18n）：字串集中在 i18n.py（en / zh-TW）─────────────────────
 from i18n import BOT_LANG, t
 
@@ -194,7 +205,7 @@ def _load_allowed_users() -> set[int]:
 
 def _save_allowed_users(users: set[int]) -> None:
     try:
-        _USERS_FILE.write_text(json.dumps(list(users)))
+        _atomic_write_text(_USERS_FILE, json.dumps(list(users)))
     except Exception:
         pass
 
@@ -217,7 +228,7 @@ def _load_plan() -> str:
 
 def _save_plan(plan: str) -> None:
     try:
-        _PLAN_FILE.write_text(json.dumps({"plan": plan}))
+        _atomic_write_text(_PLAN_FILE, json.dumps({"plan": plan}))
     except Exception:
         pass
 
@@ -238,7 +249,7 @@ def _load_defaults() -> tuple[Optional[str], Optional[str]]:
 
 def _save_defaults() -> None:
     try:
-        _DEFAULTS_FILE.write_text(json.dumps(
+        _atomic_write_text(_DEFAULTS_FILE, json.dumps(
             {"model": _default_model, "effort": _default_effort}, ensure_ascii=False))
     except Exception:
         pass
@@ -279,7 +290,7 @@ def _load_allowed_channels() -> set[int]:
 
 def _save_allowed_channels(chs: set[int]) -> None:
     try:
-        _CHANNELS_FILE.write_text(json.dumps(list(chs)))
+        _atomic_write_text(_CHANNELS_FILE, json.dumps(list(chs)))
     except Exception:
         pass
 
@@ -294,7 +305,7 @@ def _load_schedules() -> list[dict]:
 
 def _save_schedules(schedules: list[dict]) -> None:
     try:
-        _SCHEDULES_FILE.write_text(json.dumps(schedules, ensure_ascii=False, indent=2))
+        _atomic_write_text(_SCHEDULES_FILE, json.dumps(schedules, ensure_ascii=False, indent=2))
     except Exception:
         pass
 
@@ -395,7 +406,7 @@ def _persist_session(state: ChannelState) -> None:
             "cwd": str(state.cwd or DEFAULT_DIR),
             "wt": state.wt,   # worktree 模式資訊（None 表示未啟用）
         }
-        _SESSION_FILE.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        _atomic_write_text(_SESSION_FILE, json.dumps(data, ensure_ascii=False), encoding="utf-8")
     except Exception:
         pass
 
@@ -837,7 +848,7 @@ def _save_title(session_id: str, title: str) -> None:
     try:
         data = _load_titles()
         data[session_id] = title
-        _TITLES_FILE.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        _atomic_write_text(_TITLES_FILE, json.dumps(data, ensure_ascii=False), encoding="utf-8")
     except Exception:
         pass
 
@@ -2098,7 +2109,7 @@ async def on_guild_channel_delete(channel: discord.abc.GuildChannel) -> None:
         data = _load_sessions_map()
         if str(channel.id) in data:
             del data[str(channel.id)]
-            _SESSION_FILE.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            _atomic_write_text(_SESSION_FILE, json.dumps(data, ensure_ascii=False), encoding="utf-8")
     except Exception:
         pass
 
@@ -2278,7 +2289,7 @@ def _load_vectors() -> dict:
 def _save_vectors(cache: dict) -> None:
     """寫回向量快取檔。"""
     try:
-        _VECTORS_FILE.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+        _atomic_write_text(_VECTORS_FILE, json.dumps(cache, ensure_ascii=False), encoding="utf-8")
     except Exception:
         pass
 

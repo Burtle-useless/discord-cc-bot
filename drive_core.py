@@ -193,6 +193,9 @@ def load_drive(path: Path) -> bool:
 def save_drive(path: Path, on: bool) -> None:
     """把開車模式開關寫檔（失敗靜默略過，不影響指令流程）。"""
     try:
-        Path(path).write_text(json.dumps({"drive": on}))
+        p = Path(path)
+        tmp = p.with_name(p.name + ".tmp")
+        tmp.write_text(json.dumps({"drive": on}))
+        tmp.replace(p)   # 原子換檔：防寫一半崩潰留下半截 JSON
     except Exception:
         pass

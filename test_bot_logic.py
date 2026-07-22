@@ -287,6 +287,24 @@ def test_append_trace_line() -> None:
     ok("_append_trace_line 重複合併 ×N")
 
 
+def test_atomic_write_text() -> None:
+    """原子寫入：內容正確落地（新建與覆寫）、不殘留暫存檔。"""
+    import json as _json
+    import tempfile
+    import uuid
+    from pathlib import Path
+    p = Path(tempfile.gettempdir()) / f"_atomic_{uuid.uuid4().hex[:6]}.json"
+    try:
+        d._atomic_write_text(p, '{"a": 1}')
+        assert _json.loads(p.read_text()) == {"a": 1}
+        d._atomic_write_text(p, '{"a": 2}', encoding="utf-8")   # 覆寫既有檔
+        assert _json.loads(p.read_text(encoding="utf-8")) == {"a": 2}
+        assert list(p.parent.glob(p.name + ".*.tmp")) == []      # 無暫存殘留
+    finally:
+        p.unlink(missing_ok=True)
+    ok("_atomic_write_text 原子寫入與暫存清理")
+
+
 def main() -> None:
     test_classify_cc_error()
     test_context_limit_for()
@@ -302,6 +320,7 @@ def main() -> None:
     test_bar_clamp()
     test_fmt_tool_display()
     test_append_trace_line()
+    test_atomic_write_text()
     print(f"✅ 全部通過（{passed} 項）")
 
 
