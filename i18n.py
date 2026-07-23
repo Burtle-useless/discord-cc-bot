@@ -26,6 +26,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "retry_notice": "⚠️ **{kind}**, auto-retrying in {delay}s ({n}/{max})...",
         "no_response": "(no response)",
         "empty_retry_nudge": "(Your previous turn ended with internal thinking only and produced no visible text. Write out your full reply as plain text now.)",
+        "continue_nudge": "(If the whole task is already complete, output [[DONE]] and nothing else. If there are still steps you announced but have not carried out, continue and finish them now.)",
         "max_tokens_hint": "⚠️ The model spent its entire output-token budget on internal thinking and left no visible reply. Lower the thinking effort with /effort, or split the request into smaller steps, then try again.",
         "no_message": " (no message)",
         "stt_prompt": "",
@@ -79,7 +80,9 @@ _STRINGS: dict[str, dict[str, str]] = {
             "Do not merely announce a plan (e.g. 'let me first do X', 'next I'll handle Y') or stop after one or two steps and hand control back — "
             "the bot shows the ended turn as 'done', so the user thinks it is complete when it is not and has to keep typing 'continue'. "
             "Unless you need AskUserQuestion to proceed, after stating each step's intent keep acting until the whole task is finished. "
-            "Transparent execution asks you to narrate before acting, but narrating keeps the user informed; it is not a reason to stop."
+            "Transparent execution asks you to narrate before acting, but narrating keeps the user informed; it is not a reason to stop. "
+            "[Completion marker] When the whole task is genuinely finished, output [[DONE]] on its own line at the very end of your reply; the bot strips it before the user sees it. "
+            "Especially after you have used tools to carry out a task and it is fully complete, always end with [[DONE]] — otherwise the bot assumes there is more to do and nudges you to continue."
         ),
         # 跨頻道協作（AI Lounge）。coord_rule 會在啟用時附加到 system_prompt 後面，
         # 因此一律用文字描述、不嵌入反引號/錢字號等會破壞 Windows init 的危險字元。
@@ -533,6 +536,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "retry_notice": "⚠️ **{kind}**，{delay}s 後自動重試（{n}/{max}）...",
         "no_response": "（無回應）",
         "empty_retry_nudge": "（你上一回合只有內部思考、沒有輸出任何文字就結束了。請現在把要回覆的內容完整用文字寫出來。）",
+        "continue_nudge": "（若整個任務已經完成，請只輸出 [[DONE]]、不要多做。若還有你宣告過卻尚未執行的步驟，請現在繼續把它們做完。）",
         "max_tokens_hint": "⚠️ 模型把整個輸出 token 額度都花在內部思考上，沒有留下可見的回覆。請用 /effort 調低思考程度，或把問題拆成小一點的步驟，再送一次。",
         "no_message": "（無訊息）",
         "stt_prompt": "以下是繁體中文的語音。",
@@ -587,6 +591,8 @@ _STRINGS: dict[str, dict[str, str]] = {
             "bot 會把結束的回合顯示成『完成』，使用者會以為做完了、其實沒有，只能一直打「繼續」。"
             "除非你需要用 AskUserQuestion 問使用者才能繼續，否則講完每一步意圖後就接著動手，直到整體任務完成為止。"
             "上面的透明執行要你動手前先講一句，但「講」是為了讓使用者看懂、不是講完就停。"
+            "【完成標記】整個任務真正完成時，在回覆的最後單獨輸出 [[DONE]]，bot 會在使用者看到前把它清掉。"
+            "尤其當你動用工具執行任務、且已全部完成時，務必以 [[DONE]] 結尾——否則 bot 會以為還沒做完而請你繼續。"
         ),
         # 跨頻道協作（AI Lounge）。coord_rule 啟用時會附加到 system_prompt 後面，
         # 因此一律用文字描述、不嵌入反引號/錢字號等會破壞 Windows init 的危險字元。

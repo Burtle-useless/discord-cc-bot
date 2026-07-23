@@ -419,6 +419,10 @@ _running_tasks: dict[int, "asyncio.Task"] = {}
 # 同進程同 session、不 fork、不留碎片；閒置逾時才回收釋放記憶體，下次以 resume 接回。
 _clients: dict[int, "ClaudeSDKClient"] = {}
 _client_used: dict[int, float] = {}        # 每頻道 client 最後使用時間（閒置回收判斷用）
+# plan B 續跑判定用（by channel）：上一回合是否動過工具、是否打了完成標記 [[DONE]]。
+# 由 run_claude 在「清理標記前」寫入，on_message 讀取後決定要不要自動續跑。
+_last_turn_used_tool: dict[int, bool] = {}
+_last_turn_done: dict[int, bool] = {}
 _client_sigs: dict[int, tuple] = {}        # 每頻道 client 的設定指紋（變了就重建）
 CLIENT_IDLE_TIMEOUT = 900                  # 閒置逾時（秒）：超過則回收該頻道 client
 WHISPER_IDLE_UNLOAD = 600                  # 語音輸入常駐：Whisper 閒置這麼多秒沒新語音就卸載釋放 VRAM（顧遊戲）
@@ -430,6 +434,10 @@ class _StoppedByUser(Exception):
 
 
 _MILESTONE_RE = re.compile(r'\[\[MILESTONE:\s*(.+?)\]\]')
+# CC 宣告「整個任務已完成」的標記（大小寫與內部空白寬鬆）；送使用者前清掉、僅供續跑判定用。
+_DONE_RE = re.compile(r'\[\[\s*DONE\s*\]\]', re.IGNORECASE)
+# 單則使用者訊息最多自動續跑幾次（防「其實已完成卻忘打標記」時無限補刀）
+MAX_AUTO_CONTINUE = 2
 
 
 async def _run_tracked(
@@ -1046,8 +1054,9 @@ def _fold_messages(messages: list) -> tuple[str, Optional[str], int]:
     return (content or last_text), new_sid, ctx
 
 def _clean_reply(content: str) -> str:
-    """清除回覆中的 [[MILESTONE:...]] 標記與 ThinkingBlock 殘留。純函式。"""
+    """清除回覆中的 [[MILESTONE:...]]、[[DONE]] 標記與 ThinkingBlock 殘留。純函式。"""
     content = _MILESTONE_RE.sub("", content)
+    content = _DONE_RE.sub("", content)
     return re.sub(r'\[ThinkingBlock\(thinking=.*?\)\]', '', content, flags=re.DOTALL).strip()
 
 async def run_claude(
@@ -1233,6 +1242,10 @@ async def run_claude(
     content, new_sid, ctx = _fold_messages(messages)
     if ctx:
         state.ctx_tokens = ctx
+    # plan B：續跑判定要用「清理前」的原文判斷 CC 有沒有打完成標記 [[DONE]]，
+    # 並記錄這輪動過幾個工具——存進 by-channel dict 供 on_message 讀取（不改回傳簽章）。
+    _last_turn_used_tool[state._cid] = tool_count > 0
+    _last_turn_done[state._cid] = bool(_DONE_RE.search(content or live_text or ""))
     reply = _clean_reply(content)
     # 上游 #50597（Opus 工具回合後偶爾把回合末則 text 掉成空 thinking、stop=end_turn，
     # 文字有 stream 出來卻沒進最終訊息物件）→ 用串流累積的 live_text 回收，避免整段回覆消失。
@@ -3128,6 +3141,24 @@ async def on_message(message: discord.Message) -> None:
             if sid2:
                 state.session_id = sid2
                 _persist_session(state)
+        # 未完成自動續跑（plan B）：這輪動過工具、卻沒打完成標記 [[DONE]]、也不在問使用者
+        # → 極可能是任務被截斷（上游 #50597）或半途停手。用中性指令補跑，最多 MAX_AUTO_CONTINUE 次。
+        # 中性話術讓「其實已完成、只是忘打標記」的情況無害吸收：CC 只會回 [[DONE]] 就停，不會被逼著亂做。
+        _cont = 0
+        while (_cont < MAX_AUTO_CONTINUE
+               and not ask_data
+               and reply and reply != _NO_RESPONSE
+               and _last_turn_used_tool.get(state._cid)
+               and not _last_turn_done.get(state._cid)):
+            _cont += 1
+            cont_msg = await message.channel.send(t("thinking"))
+            more, sid3, ask_data = await _run_tracked(
+                message.channel.id, t("continue_nudge"), state, cont_msg)
+            if sid3:
+                state.session_id = sid3
+                _persist_session(state)
+            if more and more != _NO_RESPONSE:
+                reply = reply + "\n\n" + more
         # 過程軌跡訊息已由 run_claude 收尾（有軌跡＝定稿保留、無軌跡＝自刪），這裡不再刪除
         if ask_data:
             # 先送出「問題前的說明文字（思考結果）」，再送問題按鈕；
