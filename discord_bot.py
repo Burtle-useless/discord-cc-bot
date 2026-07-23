@@ -114,22 +114,24 @@ RETRY_BASE_DELAY   = 1.0                     # 退避基礎秒數
 # ── context 視窗上限：依「模型 + 帳號方案」套用 Anthropic 官方規則 ───────────
 # 官方規則（Claude Code: Model configuration）：
 #   1) 模型別名含 [1m]（例 claude-sonnet-4-6[1m]）→ 強制 1M；帳號若無資格 CC 會自己擋。
-#   2) Opus 在 Max／Team／Enterprise 方案 → 訂閱內建、自動升 1M，免額外設定。
-#   3) 其餘（Sonnet 任何方案、Opus 在 Pro、不支援 1M 的舊模型）→ 標準 200K。
+#   2) Opus／Fable／Mythos 在 Max／Team／Enterprise 方案 → 訂閱內建、自動升 1M，免額外設定。
+#      （Fable 5／Mythos 5 原生即 1M context，與 Opus 同為高階訂閱模型，故比照處理。）
+#   3) 其餘（Sonnet 任何方案、上述高階模型在 Pro、不支援 1M 的舊模型）→ 標準 200K。
 #      這些情況要用 1M 需另購 usage credits，做法就是加 [1m] 後綴（落回規則 1）。
 # 自動壓縮門檻＝上限的 85%（1M→850k、200K→170k）；實際數值在各呼叫點用 _ctx_limit() 算。
-_AUTO_1M_PLANS = frozenset({"max", "team", "enterprise"})   # Opus 在這些方案自動 1M
+_AUTO_1M_PLANS = frozenset({"max", "team", "enterprise"})   # 高階模型在這些方案自動 1M
 
-def _is_opus(model: str) -> bool:
-    """是否為 Opus 系列（本 bot 提供的 Opus 皆為支援 1M 的 4.6+）。"""
-    return "opus" in (model or "").lower()
+def _is_native_1m(model: str) -> bool:
+    """是否為原生 1M context 的高階模型（Opus／Fable／Mythos）：訂閱高階方案自動 1M。"""
+    m = (model or "").lower()
+    return "opus" in m or "fable" in m or "mythos" in m
 
 def context_limit_for(model: str, plan: str) -> int:
     """回傳該模型在該方案下的 context 視窗上限（tokens），套用上述官方規則。"""
     m = model or DEFAULT_MODEL or ""
     if "[1m]" in m:                                  # 規則 1：明確要 1M
         return 1_000_000
-    if _is_opus(m) and plan in _AUTO_1M_PLANS:       # 規則 2：Opus 在 Max/Team/Enterprise 自動 1M
+    if _is_native_1m(m) and plan in _AUTO_1M_PLANS:  # 規則 2：Opus/Fable/Mythos 在 Max/Team/Enterprise 自動 1M
         return 1_000_000
     return 200_000                                   # 規則 3：其餘標準 200K
 NOTIFY_AFTER_SEC = 60                        # 任務耗時超過此秒數，完成時 @使用者推播
@@ -2880,7 +2882,11 @@ async def cmd_handoff(interaction: discord.Interaction) -> None:
 async def cmd_schedule(interaction: discord.Interaction, task: str) -> None:
     if not await check_auth(interaction): return
     await interaction.response.defer()
-    parse_prompt = t("schedule_parse_prompt", task=task)
+    # 告知解析器「現在幾號幾點週幾」，否則它算不出「今晚/明天X點」這種相對時間（會排到過去或明天）
+    _WD = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+    _now = datetime.now()
+    now_str = _now.strftime("%Y-%m-%d %H:%M ") + _WD[_now.weekday()]
+    parse_prompt = t("schedule_parse_prompt", task=task, now=now_str)
     # 一次性解析：用 interaction.id 當合成頻道 id（不會與任何 channel_id 撞號），
     # 讓它自建臨時 client、不碰頻道的長駐 client；解析完在 finally 丟棄（A'）
     tmp_state = ChannelState(_cid=interaction.id, cwd=DEFAULT_DIR,

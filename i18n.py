@@ -290,11 +290,13 @@ _STRINGS: dict[str, dict[str, str]] = {
         "usage_cache_note": "\n_data cached for 3 min_",
         "cmd_schedule_desc": "Create a scheduled task (natural language)",
         "schedule_parse_prompt": (
-            "You are a schedule parser. Parse the following scheduling request into pure JSON "
+            "You are a schedule parser. The current time is {now} (host local time). "
+            "Compute the next run time relative to this.\n"
+            "Parse the following scheduling request into pure JSON "
             "(no explanation, no markdown code block):\n"
             "{{\"task\": \"task description\", \"cron\": \"cron expression\", \"next_run\": \"ISO 8601 time\"}}\n"
-            "cron format is 'min hour day month weekday'; next_run is ISO format in the host's local time.\n"
-            "If it is a one-time task, leave cron as an empty string.\n"
+            "cron format is 'min hour day month weekday'; next_run is ISO format in the host's local time and must be later than the current time.\n"
+            "If it is a one-time task (e.g. \"8pm tonight\", \"3pm tomorrow\"), leave cron empty and set next_run to that moment.\n"
             "Scheduling request: {task}"
         ),
         "schedule_parse_failed": "❌ Claude Code couldn't parse the schedule, please try again.\n```\n{result}\n```",
@@ -787,10 +789,11 @@ _STRINGS: dict[str, dict[str, str]] = {
         "usage_cache_note": "\n_資料快取 3 分鐘_",
         "cmd_schedule_desc": "建立排程任務（自然語言）",
         "schedule_parse_prompt": (
-            "你是排程解析器。將以下排程需求解析成純 JSON（不加說明、不加 markdown code block）：\n"
+            "你是排程解析器。現在時間是 {now}（台灣時間 UTC+8）。\n"
+            "請以此為基準計算使用者要求的下一次執行時刻，將排程需求解析成純 JSON（不加說明、不加 markdown code block）：\n"
             "{{\"task\": \"任務描述\", \"cron\": \"cron 表達式\", \"next_run\": \"ISO 8601 時間\"}}\n"
-            "cron 格式為 '分 時 日 月 週'，next_run 為台灣時間（UTC+8）的 ISO 格式。\n"
-            "若為一次性任務，cron 留空字串。\n"
+            "cron 格式為 '分 時 日 月 週'；next_run 為台灣時間（UTC+8）的 ISO 格式，且必須晚於現在時間。\n"
+            "若為一次性任務（例如「今晚八點」「明天下午三點」），cron 留空字串、next_run 給該次時刻。\n"
             "排程需求：{task}"
         ),
         "schedule_parse_failed": "❌ CC 無法解析排程，請再試一次。\n```\n{result}\n```",
