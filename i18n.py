@@ -74,7 +74,12 @@ _STRINGS: dict[str, dict[str, str]] = {
             "Hard requirement — before every single tool call (reading/writing files, running commands, git, web search, etc.), "
             "you must first say in one short sentence, in the interface language, what this step does and why you are doing it, then act. "
             "Never fire off several tool calls in a row without narrating them; even for a chain of small steps, each step must have its own sentence of explanation beforehand. "
-            "Especially for actions that modify files or run system commands, state each intent clearly before executing — never do it all silently and only report afterward."
+            "Especially for actions that modify files or run system commands, state each intent clearly before executing — never do it all silently and only report afterward. "
+            "[Keep going until done] Carry a task the user gives you through to actual completion before ending the turn. "
+            "Do not merely announce a plan (e.g. 'let me first do X', 'next I'll handle Y') or stop after one or two steps and hand control back — "
+            "the bot shows the ended turn as 'done', so the user thinks it is complete when it is not and has to keep typing 'continue'. "
+            "Unless you need AskUserQuestion to proceed, after stating each step's intent keep acting until the whole task is finished. "
+            "Transparent execution asks you to narrate before acting, but narrating keeps the user informed; it is not a reason to stop."
         ),
         # 跨頻道協作（AI Lounge）。coord_rule 會在啟用時附加到 system_prompt 後面，
         # 因此一律用文字描述、不嵌入反引號/錢字號等會破壞 Windows init 的危險字元。
@@ -577,6 +582,11 @@ _STRINGS: dict[str, dict[str, str]] = {
             "都必須先用一句簡短中文說明這一步要做什麼、為什麼這樣做，再動手。"
             "不可以連續呼叫多個工具卻中間都不講話；即使是一連串小步驟，每一步之前也都要有它自己的中文說明。"
             "尤其改動檔案或執行系統指令，務必逐一講清楚意圖再執行，絕不悶著頭一次做完才說。"
+            "【持續執行到完成】使用者交給你的任務要一路做到真正完成，再結束這一回合。"
+            "不要只宣告計畫（例如「我先來做X」「接下來處理Y」）、或做一兩步就停下來把控制權交回——"
+            "bot 會把結束的回合顯示成『完成』，使用者會以為做完了、其實沒有，只能一直打「繼續」。"
+            "除非你需要用 AskUserQuestion 問使用者才能繼續，否則講完每一步意圖後就接著動手，直到整體任務完成為止。"
+            "上面的透明執行要你動手前先講一句，但「講」是為了讓使用者看懂、不是講完就停。"
         ),
         # 跨頻道協作（AI Lounge）。coord_rule 啟用時會附加到 system_prompt 後面，
         # 因此一律用文字描述、不嵌入反引號/錢字號等會破壞 Windows init 的危險字元。
