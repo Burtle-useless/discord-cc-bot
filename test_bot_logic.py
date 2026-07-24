@@ -287,6 +287,52 @@ def test_fmt_tool_display() -> None:
     ok("_fmt_tool 危險判準收斂與 description 顯示（含順序與截斷）")
 
 
+def test_seg_fold() -> None:
+    """段落摺疊統計：分類計數、檔名去重、增刪行數近似、-# 小字格式、空段不出行。"""
+    seg = d._new_seg()
+    assert d._fmt_seg_summary(seg) == ""                        # 空段（沒動工具）不出統計行
+    d._seg_add(seg, "Read", {"file_path": "C:/a/x.py"})
+    d._seg_add(seg, "Bash", {"command": "ls"})
+    d._seg_add(seg, "PowerShell", {"command": "Get-Date"})
+    d._seg_add(seg, "Write", {"file_path": "C:/a/new.py", "content": "a\nb\nc"})
+    d._seg_add(seg, "Edit", {"file_path": "C:/a/x.py",
+                             "old_string": "1\n2", "new_string": "1\n2\n3"})
+    line = d._fmt_seg_summary(seg)
+    assert line.startswith("-# "), line                         # Discord 子文字（小灰字）格式
+    assert "read 1" in line and "ran 2" in line                 # Bash+PowerShell 同歸指令類
+    assert "new.py" in line and "x.py" in line
+    assert "+6" in line and "−2" in line                        # Write 3 行＋Edit 新 3 行／舊 2 行
+    # 同一檔連續修改：檔名去重、增刪行數照算
+    seg2 = d._new_seg()
+    d._seg_add(seg2, "Edit", {"file_path": "C:/b.py", "old_string": "x", "new_string": "y"})
+    d._seg_add(seg2, "Edit", {"file_path": "C:/b.py", "old_string": "x", "new_string": "y"})
+    s2 = d._fmt_seg_summary(seg2)
+    assert s2.count("b.py") == 1 and "+2" in s2 and "−2" in s2
+    # 先 Write 後 Edit 同一檔：算「新增」不重複列進「修改」
+    seg3 = d._new_seg()
+    d._seg_add(seg3, "Write", {"file_path": "C:/c.py", "content": "a"})
+    d._seg_add(seg3, "Edit", {"file_path": "C:/c.py", "old_string": "a", "new_string": "b"})
+    assert seg3["created"] == ["c.py"] and seg3["edited"] == []
+    # 檔名最多列兩個（各包 code span 防底線被 Discord 吃掉），其餘收 +N
+    assert d._seg_names(["f0.py", "f1.py", "f2.py", "f3.py"]) == "`f0.py`, `f1.py` +2"
+    assert d._seg_names(["__init__.py"]) == "`__init__.py`"
+    # 未知工具歸「其他」
+    seg4 = d._new_seg()
+    d._seg_add(seg4, "Task", {"prompt": "x"})
+    assert "other" in d._fmt_seg_summary(seg4)
+    # NotebookEdit 鍵名不同（notebook_path/new_source），不可在統計中隱形
+    seg5 = d._new_seg()
+    d._seg_add(seg5, "NotebookEdit", {"notebook_path": "C:/n.ipynb", "new_source": "a\nb"})
+    s5 = d._fmt_seg_summary(seg5)
+    assert "n.ipynb" in s5 and "+2" in s5
+    # 先 Edit 後 Write 同一檔（改壞重寫）：只列「新增」，不重複列進「修改」
+    seg6 = d._new_seg()
+    d._seg_add(seg6, "Edit", {"file_path": "C:/d.py", "old_string": "a", "new_string": "b"})
+    d._seg_add(seg6, "Write", {"file_path": "C:/d.py", "content": "z"})
+    assert seg6["created"] == ["d.py"] and seg6["edited"] == []
+    ok("_new_seg/_seg_add/_fmt_seg_summary 段落摺疊")
+
+
 def test_append_trace_line() -> None:
     """連續相同的工具行合併成 ×N 不洗版；不同行照常換行累積。"""
     tr = ""
@@ -332,6 +378,7 @@ def main() -> None:
     test_purge_title_shell()
     test_bar_clamp()
     test_fmt_tool_display()
+    test_seg_fold()
     test_append_trace_line()
     test_atomic_write_text()
     print(f"✅ 全部通過（{passed} 項）")

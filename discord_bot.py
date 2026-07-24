@@ -665,6 +665,82 @@ def _append_trace_line(trace: str, line: str) -> str:
         return f"{head}{sep}{base} ×{n + 1}"
     return f"{trace}\n{line}"
 
+# ── 段落摺疊統計（桌面版風格的過程顯示）─────────────────────────────────
+# 一段＝CC 的一句說明＋其下所有工具呼叫。工具不再逐行列出，收成一行小灰字統計
+#（Discord 的 -# 子文字），仿 Claude 桌面版的摺疊列。破壞性指令是唯一例外：
+# 仍完整單獨列行（見 _commit_step），保住「核對它在跑什麼」的安全性。
+
+def _nlines(s: str) -> int:
+    """字串行數（增刪行數統計用；空字串算 0 行）。"""
+    return (s.count("\n") + 1) if s else 0
+
+def _new_seg() -> dict:
+    """新的段落累積器：分類計數、動過的檔名、增刪行數。"""
+    return {"reads": 0, "cmds": 0, "searches": 0, "webs": 0, "others": 0,
+            "created": [], "edited": [], "added": 0, "removed": 0}
+
+def _seg_add(seg: dict, name: str, inp: dict) -> None:
+    """把一個工具呼叫計入段落統計。增刪行數以參數行數近似（Write=全新增、
+    Edit=舊字串全刪＋新字串全增），要的是量級感，不做真 diff。"""
+    if name == "Read":
+        seg["reads"] += 1
+    elif name == "Write":
+        p = Path(str(inp.get("file_path", ""))).name
+        if p:
+            if p in seg["edited"]:
+                seg["edited"].remove(p)   # 改壞重寫：最終是整檔重寫，只列「新增」不重複列
+            if p not in seg["created"]:
+                seg["created"].append(p)
+        seg["added"] += _nlines(str(inp.get("content", "")))
+    elif name in ("Edit", "MultiEdit", "NotebookEdit"):
+        # NotebookEdit 鍵名不同（notebook_path／new_source、無 old_*），一併相容，否則統計隱形
+        p = Path(str(inp.get("file_path") or inp.get("notebook_path") or "")).name
+        if p and p not in seg["created"] and p not in seg["edited"]:
+            seg["edited"].append(p)
+        edits = inp.get("edits") if name == "MultiEdit" else [inp]
+        for e in (edits or []):
+            if isinstance(e, dict):
+                seg["added"] += _nlines(str(e.get("new_string") or e.get("new_source") or ""))
+                seg["removed"] += _nlines(str(e.get("old_string") or ""))
+    elif name in ("Bash", "PowerShell"):
+        seg["cmds"] += 1
+    elif name in ("Grep", "Glob"):
+        seg["searches"] += 1
+    elif name in ("WebSearch", "WebFetch"):
+        seg["webs"] += 1
+    else:
+        seg["others"] += 1
+
+def _seg_names(names: list[str]) -> str:
+    """檔名清單顯示：最多列兩個，其餘收成 +N。
+    檔名包進 code span：裸檔名的底線會被 Discord 當標記吃掉（如 __init__.py 會變底線字）。"""
+    disp = ", ".join("`" + n.replace("`", "'") + "`" for n in names[:2])
+    return disp + (f" +{len(names) - 2}" if len(names) > 2 else "")
+
+def _fmt_seg_summary(seg: dict) -> str:
+    """段落統計 → 一行 Discord 小字（-# 子文字）。空段（沒動工具）回空字串。純函式。"""
+    parts: list[str] = []
+    if seg["reads"]:
+        parts.append(t("seg_read", n=seg["reads"]))
+    if seg["searches"]:
+        parts.append(t("seg_search", n=seg["searches"]))
+    if seg["cmds"]:
+        parts.append(t("seg_cmds", n=seg["cmds"]))
+    if seg["created"]:
+        parts.append(t("seg_created", names=_seg_names(seg["created"])))
+    if seg["edited"]:
+        parts.append(t("seg_edited", names=_seg_names(seg["edited"])))
+    if seg["webs"]:
+        parts.append(t("seg_web", n=seg["webs"]))
+    if seg["others"]:
+        parts.append(t("seg_other", n=seg["others"]))
+    if not parts:
+        return ""
+    line = "・".join(parts)
+    if seg["added"] or seg["removed"]:
+        line += f"　**+{seg['added']} −{seg['removed']}**"
+    return f"-# {line}"
+
 # ── 危險指令確認（第二階段）──────────────────────────────────────────────
 # 逾時秒數（逾時＝取消不執行）。刻意小於 INACTIVITY_TIMEOUT，確認期間才不會被誤判卡死。
 _CONFIRM_TIMEOUT_SEC = 300
@@ -1069,6 +1145,7 @@ async def run_claude(
     """回傳 (content, new_session_id, ask_question_data)"""
     trace: str = ""      # 已定稿的過程軌跡：一步步往下累積、不覆蓋（顯示在同一則訊息內）
     tool_count: int = 0
+    seg: dict = _new_seg()   # 進行中的段落統計（目前這句說明底下累積的工具摺疊）
     start = time.time()
     pending_question: dict = {}
     live_text: str = ""  # 生成中累積的回應文字（底部狀態列即時顯示尾段）
@@ -1079,35 +1156,47 @@ async def run_claude(
     # 一眼確認「在跑的是自己給的指令」（防幻象指令、防檔案/網路夾帶的惡意指令）
     _cmd_disp = _BOT_PROMPT_RE.sub("", prompt).replace("\n", " ").replace("`", "'").strip()[:100]
 
+    def _flush_seg() -> None:
+        """段落收尾：把累積的工具統計收成一行小灰字掛進軌跡（在上一句說明底下），重開新段。"""
+        nonlocal trace, seg
+        line = _fmt_seg_summary(seg)
+        if line:
+            trace = _append_trace_line(trace, line)
+        seg = _new_seg()
+
     def _commit_step(am) -> None:
-        """把一個 AssistantMessage 定稿成軌跡的一段（往下累積、不覆蓋）：
-        工具→_fmt_tool、動手前的中文過場白→💭。只有「這步動了工具」才進軌跡；
-        純文字回應（無工具）留給最後的 reply 呈現，避免同一段文字重複出現兩次。"""
-        nonlocal trace, pending_question, tool_count, live_text
+        """把一個 AssistantMessage 併入軌跡（桌面版風格）：說明文字當主行、
+        工具呼叫摺疊進段落統計（下一句說明出現時由 _flush_seg 收成一行小字）。
+        只有「這步動了工具」才進軌跡；純文字回應（無工具）留給最後的 reply 呈現。"""
+        nonlocal trace, pending_question, tool_count, live_text, seg
         content = getattr(am, "content", [])
         if not isinstance(content, list):
             return
         has_tool = any(isinstance(b, ToolUseBlock) for b in content)
         if not has_tool:
             return                      # 無工具（純思考／純正式回應）：留給 reply，不進軌跡
-        lines: list[str] = []
         for block in content:
             if isinstance(block, ToolUseBlock):
                 name = block.name
                 inp = getattr(block, "input", {}) or {}
                 if name == "AskUserQuestion":
                     pending_question = inp
-                lines.append(_fmt_tool(name, inp))
                 tool_count += 1
+                # ⚠️ 破壞性指令是摺疊的唯一例外：先把目前統計收尾，再完整單獨列行——
+                # 摺疊會把指令藏起來，「核對它到底在跑什麼」的防線（防幻象／夾帶指令）就沒了
+                if (name in ("Bash", "PowerShell")
+                        and _DESTRUCTIVE_RE.search(str(inp.get("command", "")))):
+                    _flush_seg()
+                    trace = _append_trace_line(trace, _fmt_tool(name, inp))
+                else:
+                    _seg_add(seg, name, inp)
             elif hasattr(block, "text"):
-                # 有工具的訊息裡的 text 一定是「動手前的中文說明」（這一步在做什麼、為什麼），
-                # 完整保留（截到 400 字防軌跡爆長、保留換行），讓使用者看清每一步的意圖。
+                # 有工具的訊息裡的 text＝動手前的說明：先收上一段的統計（掛在上一句底下），
+                # 再把這句以主行呈現（截 400 字防軌跡爆長、保留換行）
                 txt = (block.text or "").strip()
                 if txt and not txt.startswith("["):
-                    lines.append(f"💭 {txt[:400]}")
-        for ln in lines:
-            # 逐行併入軌跡：連續重複的同一動作合併成 ×N（見 _append_trace_line）
-            trace = _append_trace_line(trace, ln)
+                    _flush_seg()
+                    trace = _append_trace_line(trace, txt[:400])
         # 這步已定稿進軌跡 → 清即時尾段，下一步重新累積
         live_text = ""
 
@@ -1126,6 +1215,10 @@ async def run_claude(
         # 本回合指令原文：讓使用者核對「在跑的是我給的指令」（防幻象／夾帶指令）
         if _cmd_disp:
             lines.append(f"📥 `{_cmd_disp}`")
+        # 進行中段落的即時統計：這段還沒收尾，先在狀態列預覽「目前讀了幾檔、跑了幾個指令」
+        _seg_line = _fmt_seg_summary(seg)
+        if _seg_line:
+            lines.append(_seg_line)
         # 生成階段：回應字數 + 即時文字尾段，作為「還活著」的存活訊號
         if live_text:
             _tx = live_text[-180:].replace("\n", " ")
@@ -1136,6 +1229,7 @@ async def run_claude(
         """軌跡撞單則 2000 字上限：把舊訊息凍結成純軌跡永久保留，另開一則新訊息繼續往下累積。
         先同步交換 trace 再 await，避免換訊息期間 _commit_step 的新內容漏進舊清單而遺失。"""
         nonlocal cur_msg, trace
+        _flush_seg()   # 先把進行中統計收回舊訊息的說明句底下，不然會錯掛成新訊息的第一行
         frozen, trace = trace.strip(), ""
         try:
             if frozen and cur_msg:
@@ -1227,15 +1321,22 @@ async def run_claude(
                 pass
         if anim_task:
             anim_task.cancel()
+            try:
+                await anim_task   # 等取消塵埃落定，避免 _roll_message 半途狀態與下面收尾交錯
+            except BaseException:
+                pass
         # 過程訊息收尾：成功才把當前那則定稿成純軌跡永久保留（無軌跡＝簡單問答則刪掉不留殘訊）。
         # 失敗（逾時／中斷／例外）不動它，保留現況與 state._live_msg，讓 on_message 在同一則上顯示錯誤。
         if ok:
+            _flush_seg()   # 最後一段收尾：後面沒有下一句說明來觸發，這裡補收統計行
             if cur_msg:
                 _final = trace.strip()
                 try:
                     if _final:
                         await cur_msg.edit(content=_final[:1990])
-                    else:
+                    elif tool_count == 0:
+                        # 只有「純問答、沒動過工具」才刪過程訊息；動過工具卻拿到空軌跡
+                        # ＝滾動換訊息半途被取消的競態，保留舊訊息現況、不誤刪已凍結的軌跡
                         await cur_msg.delete()
                 except Exception:
                     pass

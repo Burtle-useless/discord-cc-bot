@@ -27,6 +27,14 @@ _STRINGS: dict[str, dict[str, str]] = {
         "no_response": "(no response)",
         "empty_retry_nudge": "(Your previous turn ended with internal thinking only and produced no visible text. Write out your full reply as plain text now.)",
         "continue_nudge": "(If the whole task is already complete, output [[DONE]] and nothing else. If there are still steps you announced but have not carried out, continue and finish them now.)",
+        # 段落摺疊統計行（桌面版風格過程顯示）的零件
+        "seg_read": "read {n} file(s)",
+        "seg_search": "{n} search(es)",
+        "seg_cmds": "ran {n} command(s)",
+        "seg_created": "created {names}",
+        "seg_edited": "edited {names}",
+        "seg_web": "{n} web lookup(s)",
+        "seg_other": "{n} other tool call(s)",
         "max_tokens_hint": "⚠️ The model spent its entire output-token budget on internal thinking and left no visible reply. Lower the thinking effort with /effort, or split the request into smaller steps, then try again.",
         "no_message": " (no message)",
         "stt_prompt": "",
@@ -71,11 +79,11 @@ _STRINGS: dict[str, dict[str, str]] = {
             "[Memory honesty] Long conversations get auto-compacted, so you may not remember changes you made earlier. "
             "When you see code in the project you don't remember, do not assert it was another session or wasn't you; "
             "verify with git log, file mtimes, or the compaction summary, and if you can't, honestly say you're unsure whether it was you — never fabricate a source. "
-            "[Transparent execution] While working, let the user follow what you are doing at each step and why — this is an output-format requirement, not a cue to stop and hand the turn back. "
-            "Hard requirement — before every single tool call (reading/writing files, running commands, git, web search, etc.), "
-            "you must first say in one short sentence, in the interface language, what this step does and why you are doing it, then act. "
-            "Never fire off several tool calls in a row without narrating them; even for a chain of small steps, each step must have its own sentence of explanation beforehand. "
-            "Especially for actions that modify files or run system commands, state each intent clearly before executing — never do it all silently and only report afterward. "
+            "[Transparent execution] While working, let the user follow what you are doing and why — this is an output-format requirement, not a cue to stop and hand the turn back. "
+            "Narrate per phase: before each meaningful phase (starting to investigate something, modifying a file, running verification, etc.), "
+            "first say in one short sentence, in the interface language, what the phase does and why; within the same phase you may run several related tool calls in a row without narrating each one. "
+            "Before changing direction, after an important discovery, or before any destructive or irreversible action, start a new sentence of narration. "
+            "Going through the whole task silently is not acceptable; but do not write one sentence per tiny tool call either — align narration with the turning points of your reasoning. "
             "[Keep going until done] This is the highest-priority rule: carry a task the user gives you through to actual completion before ending the turn. "
             "Within a single turn, as long as any step you announced — or that the task itself implies — is still not carried out, you must not end the turn or hand control back. "
             "A turn may end in only two cases: (1) the whole task is genuinely complete and you output [[DONE]], or (2) you must use AskUserQuestion to proceed; otherwise always keep going. "
@@ -423,8 +431,8 @@ _STRINGS: dict[str, dict[str, str]] = {
             "**Reading the progress message**:\n"
             "• 📥 the top line echoes the command being processed — verify it's really yours\n"
             "• 💬 the second line shows the conversation title and model in use\n"
-            "• ⚙️📖✏️ are tools being used; a leading ⚠️ means it modifies files or runs system commands — worth a glance\n"
-            "• 💭 is a thought snippet; ✍️ means the reply is being generated\n"
+            "• each step is one narration line, with a small gray summary underneath (files read, commands run, +added −removed lines)\n"
+            "• ⚠️ lines are destructive commands, always shown in full so you can verify them; ✍️ means the reply is being generated\n"
             "\n"
             "**Stop mid-task**: `/stop` halts the current job immediately.\n"
             "**Resume**: `/continue` picks up the previous session; see `/guide Conversations` for more.\n"
@@ -506,7 +514,7 @@ _STRINGS: dict[str, dict[str, str]] = {
             "\n"
             "**Dangerous-action confirmation**: with `/confirm on`, destructive commands (delete, format, git push, shutdown…) pop a button for your approval first, auto-cancelling on timeout. Off by default. It guards against slips — it is not a sandbox.\n"
             "\n"
-            "**Transparency works for you**: the 📥 command echo guards against \"it's running something else\"; ⚠️ makes file edits and system commands visible at a glance; plans are stated before acting. Anything looks off — `/stop` any time."
+            "**Transparency works for you**: the 📥 command echo guards against \"it's running something else\"; destructive commands are never folded — each gets its own ⚠️ line in full for you to verify; other file edits and commands show up in the gray per-step summaries. Anything looks off — `/stop` any time."
         ),
         "busy_prev": "⏳ Still handling the previous message, please try again shortly.",
         "heard": "🎤 Heard: {heard}",
@@ -539,6 +547,14 @@ _STRINGS: dict[str, dict[str, str]] = {
         "no_response": "（無回應）",
         "empty_retry_nudge": "（你上一回合只有內部思考、沒有輸出任何文字就結束了。請現在把要回覆的內容完整用文字寫出來。）",
         "continue_nudge": "（若整個任務已經完成，請只輸出 [[DONE]]、不要多做。若還有你宣告過卻尚未執行的步驟，請現在繼續把它們做完。）",
+        # 段落摺疊統計行（桌面版風格過程顯示）的零件
+        "seg_read": "讀 {n} 個檔案",
+        "seg_search": "搜尋 {n} 次",
+        "seg_cmds": "執行 {n} 個指令",
+        "seg_created": "新增 {names}",
+        "seg_edited": "修改 {names}",
+        "seg_web": "上網 {n} 次",
+        "seg_other": "其他工具 {n} 次",
         "max_tokens_hint": "⚠️ 模型把整個輸出 token 額度都花在內部思考上，沒有留下可見的回覆。請用 /effort 調低思考程度，或把問題拆成小一點的步驟，再送一次。",
         "no_message": "（無訊息）",
         "stt_prompt": "以下是繁體中文的語音。",
@@ -583,11 +599,11 @@ _STRINGS: dict[str, dict[str, str]] = {
             "【記憶誠實】長對話的歷史會被自動壓縮，你可能對自己稍早做過的改動沒有印象。"
             "看到專案裡你不記得的程式碼時，不要斷言是別的 session 做的、或不是你做的；"
             "先用 git log、檔案修改時間、或壓縮摘要查證，查不到就如實說無法確定是否為你先前所做，絕不杜撰來源。"
-            "【透明執行】執行任務時，讓使用者能看懂你每一步在做什麼、為什麼——這是輸出格式的要求，不是要你停下來把回合交回。"
-            "硬性要求——每一次工具呼叫（讀寫檔案、執行指令、git、搜尋網路等）之前，"
-            "都必須先用一句簡短中文說明這一步要做什麼、為什麼這樣做，再動手。"
-            "不可以連續呼叫多個工具卻中間都不講話；即使是一連串小步驟，每一步之前也都要有它自己的中文說明。"
-            "尤其改動檔案或執行系統指令，務必逐一講清楚意圖再執行，絕不悶著頭一次做完才說。"
+            "【透明執行】執行任務時，讓使用者能看懂你在做什麼、為什麼——這是輸出格式的要求，不是要你停下來把回合交回。"
+            "節奏以「階段」為單位：每進入一個有意義的階段（開始查一件事、動手改一個檔、跑驗證等）之前，"
+            "先用一句簡短中文說明這個階段要做什麼、為什麼；同一階段內可以連續執行多個相關的工具呼叫，中間不必逐一說明。"
+            "換方向、有重要發現、或要執行破壞性／不可逆操作之前，必須另起一句新的說明。"
+            "整個任務悶著頭不講話不行；但也不要為每一個小工具呼叫各講一句——說明要對齊思路的轉折點。"
             "【持續執行到完成】這是最高優先規則：使用者交給你的任務要一路做到真正完成，再結束這一回合。"
             "在同一個回合裡，只要還有你宣告過、或任務本身隱含而尚未執行的步驟，就絕對不可以結束回合、把控制權交回。"
             "回合只允許在兩種情況下結束：一是整個任務已真正完成並輸出 [[DONE]]，二是你必須用 AskUserQuestion 問使用者才能繼續；除此之外一律繼續做下去。"
@@ -919,8 +935,8 @@ _STRINGS: dict[str, dict[str, str]] = {
             "**看懂「思考中」訊息**：\n"
             "• 📥 頂部那行是「正在處理的指令原文」，可核對它跑的是不是你說的話\n"
             "• 💬 第二行是目前對話標題與使用的模型\n"
-            "• ⚙️📖✏️ 是它正在用的工具；⚠️ 開頭代表會改檔案或跑系統指令，多看一眼\n"
-            "• 💭 是它的想法片段；✍️ 是回覆生成中\n"
+            "• 每一步是一句說明，底下一行小灰字統計這步做了什麼（讀幾個檔、跑幾個指令、增刪多少行）\n"
+            "• ⚠️ 開頭是破壞性指令，一律完整列出讓你核對；✍️ 是回覆生成中\n"
             "\n"
             "**中途想停**：`/stop` 立即中止目前工作。\n"
             "**接續舊話**：`/continue` 恢復上一段 session；更多見 `/guide 對話管理`。\n"
@@ -1002,7 +1018,7 @@ _STRINGS: dict[str, dict[str, str]] = {
             "\n"
             "**危險動作確認**：`/confirm on` 開啟後，偵測到破壞性指令（刪除、格式化、git push、關機…）會先跳按鈕請你放行，逾時自動取消。預設是關的。它防的是手滑，不是沙箱。\n"
             "\n"
-            "**透明化在幫你**：📥 指令核對防「它在跑別的東西」；⚠️ 讓改檔和系統指令一眼可見；動手前先講計畫。看到不對勁隨時 `/stop`。"
+            "**透明化在幫你**：📥 指令核對防「它在跑別的東西」；破壞性指令絕不摺疊，一律以 ⚠️ 單獨完整列出讓你核對；其餘改檔與指令都收在每一步的小灰字統計裡。看到不對勁隨時 `/stop`。"
         ),
         "busy_prev": "⏳ 還在處理上一則訊息，請稍後再試。",
         "heard": "🎤 聽到：{heard}",
