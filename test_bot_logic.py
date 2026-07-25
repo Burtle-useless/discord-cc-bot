@@ -12,7 +12,7 @@ import sys
 # 主模組 import 時檢查必填環境變數；測試用假值即可（不會真的連線）
 os.environ.setdefault("DISCORD_TOKEN", "test-dummy-token")
 os.environ.setdefault("ALLOWED_USER", "1")
-os.environ.setdefault("BOT_LANG", "en")   # 固定語言，讓字串相關斷言穩定
+os.environ["BOT_LANG"] = "en"   # 強制固定語言：在 bot 子進程（CC 殼）裡跑時會繼承 zh-TW，setdefault 擋不住
 
 import discord_bot as d  # noqa: E402（環境變數要先設好才能 import）
 
@@ -60,6 +60,7 @@ def test_context_limit_for() -> None:
     assert f("claude-sonnet-4-6", "pro") == 200_000
     assert f("claude-sonnet-4-6[1m]", "pro") == 1_000_000       # 規則 1：別名強制
     assert f("claude-opus-4-8", "max") == 1_000_000             # 規則 2：Opus 自動
+    assert f("claude-opus-5", "max") == 1_000_000               # Opus 5（2026-07 上線）同樣命中
     assert f("claude-opus-4-8", "enterprise") == 1_000_000
     assert f("claude-opus-4-8", "pro") == 200_000               # Opus 在 Pro 不自動
     assert f("claude-opus-4-8", "unknown") == 200_000
