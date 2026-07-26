@@ -212,6 +212,22 @@ def test_clean_reply() -> None:
     ok("_clean_reply 標記清除")
 
 
+def test_turn_end_markers() -> None:
+    """回合結束標記：[[DONE]] 與 [[WAIT]] 都要被辨識、且送使用者前清乾淨。
+
+    [[WAIT]]＝「已提問、正在等回答」。少了它，純文字提問會讓續跑護欄把
+    「等使用者回話」誤判成早停而補跑（逼 CC 自問自答），故釘住此行為。
+    """
+    assert d._WAIT_RE.search("問題在上面 [[WAIT]]")
+    assert d._WAIT_RE.search("x [[ wait ]] y")          # 大小寫與內部空白寬鬆
+    assert not d._WAIT_RE.search("waiting for you")     # 不誤抓一般文字
+    assert d._clean_reply("要選哪個？ [[WAIT]]") == "要選哪個？"
+    assert d._clean_reply("做完了 [[DONE]]") == "做完了"
+    # 兩個標記互不干擾：只打 WAIT 不該被當成完成
+    assert not d._DONE_RE.search("等你回覆 [[WAIT]]")
+    ok("[[DONE]] / [[WAIT]] 回合結束標記")
+
+
 def test_channel_state() -> None:
     """ChannelState：預設值、slots fail-loud（打錯欄位名立刻炸，不靜默）。"""
     st = d.get_state(999_999_999)
@@ -375,6 +391,7 @@ def main() -> None:
     test_reply_cleanup()
     test_fold_messages()
     test_clean_reply()
+    test_turn_end_markers()
     test_channel_state()
     test_purge_title_shell()
     test_bar_clamp()

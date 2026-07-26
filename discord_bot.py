@@ -425,6 +425,10 @@ _client_used: dict[int, float] = {}        # 每頻道 client 最後使用時間
 # 由 run_claude 在「清理標記前」寫入，on_message 讀取後決定要不要自動續跑。
 _last_turn_used_tool: dict[int, bool] = {}
 _last_turn_done: dict[int, bool] = {}
+# 上一回合是否以「等使用者回答」收尾（[[WAIT]] 標記）。AskUserQuestion 在部分 SDK/CLI
+# 組合下不在工具清單裡，CC 只能用純文字提問 → ask_data 為空 → 護欄會把「正在等回答」
+# 誤判成早停而補跑。這個文字出口讓 CC 不依賴該工具也能表達「本回合正常結束、等你回話」。
+_last_turn_wait: dict[int, bool] = {}
 _client_sigs: dict[int, tuple] = {}        # 每頻道 client 的設定指紋（變了就重建）
 CLIENT_IDLE_TIMEOUT = 900                  # 閒置逾時（秒）：超過則回收該頻道 client
 WHISPER_IDLE_UNLOAD = 600                  # 語音輸入常駐：Whisper 閒置這麼多秒沒新語音就卸載釋放 VRAM（顧遊戲）
@@ -438,6 +442,8 @@ class _StoppedByUser(Exception):
 _MILESTONE_RE = re.compile(r'\[\[MILESTONE:\s*(.+?)\]\]')
 # CC 宣告「整個任務已完成」的標記（大小寫與內部空白寬鬆）；送使用者前清掉、僅供續跑判定用。
 _DONE_RE = re.compile(r'\[\[\s*DONE\s*\]\]', re.IGNORECASE)
+# CC 宣告「我問了問題、正在等使用者回答」的標記；同樣送出前清掉、僅供續跑判定用。
+_WAIT_RE = re.compile(r'\[\[\s*WAIT\s*\]\]', re.IGNORECASE)
 # 單則使用者訊息最多自動續跑幾次（防「其實已完成卻忘打標記」時無限補刀）
 MAX_AUTO_CONTINUE = 2
 
@@ -555,8 +561,13 @@ def _build_options(state: ChannelState) -> ClaudeAgentOptions:
             + (t("coord_rule") if COORD_ENABLED else "")
             + (t("drive_rule") if (_drive_mode and drive_core) else ""),
         },
+        # 思考摘要：Opus 4.7+ 預設 display="omitted"（只回簽章、沒有文字），這是
+        # 過程訊息「思考中」永遠空白的根因。改 "summarized" 才拿得到思考文字。
+        # 用 adaptive 而非 enabled：由模型自行決定要不要思考、深度仍由 effort 控制，
+        # 不強迫思考也不改變模型行為（簡單問題就不會有思考文字，屬正常）。
+        thinking={"type": "adaptive", "display": "summarized"},
     )
-    # 開啟逐字串流，讓生成中的回應能即時顯示在「思考中」訊息，提供存活訊號
+    # 開啟逐字串流，讓生成中的思考／回應能即時顯示在「思考中」訊息，提供存活訊號
     options.include_partial_messages = True
     return options
 
@@ -1132,9 +1143,10 @@ def _fold_messages(messages: list) -> tuple[str, Optional[str], int]:
     return (content or last_text), new_sid, ctx
 
 def _clean_reply(content: str) -> str:
-    """清除回覆中的 [[MILESTONE:...]]、[[DONE]] 標記與 ThinkingBlock 殘留。純函式。"""
+    """清除回覆中的 [[MILESTONE:...]]、[[DONE]]、[[WAIT]] 標記與 ThinkingBlock 殘留。純函式。"""
     content = _MILESTONE_RE.sub("", content)
     content = _DONE_RE.sub("", content)
+    content = _WAIT_RE.sub("", content)
     return re.sub(r'\[ThinkingBlock\(thinking=.*?\)\]', '', content, flags=re.DOTALL).strip()
 
 async def run_claude(
@@ -1149,6 +1161,7 @@ async def run_claude(
     start = time.time()
     pending_question: dict = {}
     live_text: str = ""  # 生成中累積的回應文字（底部狀態列即時顯示尾段）
+    live_think: str = ""  # 本步累積的思考摘要（狀態列顯示尾段，讓使用者看得到模型在想什麼）
     cur_msg = progress_msg           # 當前正在往下寫的過程訊息（撞 2000 上限會換新的一則）
     state._live_msg = progress_msg   # 同步給 on_message：錯誤路徑要在這則上顯示錯誤
     last_activity = [time.time()]  # CC 最後一次有輸出的時間（閒置逾時判斷用）
@@ -1168,7 +1181,7 @@ async def run_claude(
         """把一個 AssistantMessage 併入軌跡（桌面版風格）：說明文字當主行、
         工具呼叫摺疊進段落統計（下一句說明出現時由 _flush_seg 收成一行小字）。
         只有「這步動了工具」才進軌跡；純文字回應（無工具）留給最後的 reply 呈現。"""
-        nonlocal trace, pending_question, tool_count, live_text, seg
+        nonlocal trace, pending_question, tool_count, live_text, live_think, seg
         content = getattr(am, "content", [])
         if not isinstance(content, list):
             return
@@ -1199,6 +1212,7 @@ async def run_claude(
                     trace = _append_trace_line(trace, txt[:400])
         # 這步已定稿進軌跡 → 清即時尾段，下一步重新累積
         live_text = ""
+        live_think = ""
 
     _spinner = ["🌑","🌒","🌓","🌔","🌕","🌖","🌗","🌘"]
 
@@ -1219,10 +1233,15 @@ async def run_claude(
         _seg_line = _fmt_seg_summary(seg)
         if _seg_line:
             lines.append(_seg_line)
-        # 生成階段：回應字數 + 即時文字尾段，作為「還活著」的存活訊號
+        # 生成階段：回應字數 + 即時文字尾段，作為「還活著」的存活訊號。
+        # 尚未開始產文字但已有思考摘要＝思考階段，改顯示思考尾段（模型現在在想什麼）。
         if live_text:
             _tx = live_text[-180:].replace("\n", " ")
             lines.append(t("generating", n=len(live_text)) + f"　> {_tx}")
+        elif live_think:
+            # 去反引號：思考內容常含程式碼片段，截尾段容易留下未閉合的反引號而吃掉整則格式
+            _th = live_think[-180:].replace("\n", " ").replace("`", "'")
+            lines.append(f"💭 {_th}")
         return "\n".join(lines)
 
     async def _roll_message() -> None:
@@ -1268,7 +1287,7 @@ async def run_claude(
     messages = []
 
     async def _run_client() -> None:
-        nonlocal live_text
+        nonlocal live_text, live_think
         try:
             client = await _acquire_client(state)   # 長駐：取池中 client，無則新建連線
             await client.query(prompt)
@@ -1282,6 +1301,9 @@ async def run_claude(
                         dt = delta.get("type")
                         if dt == "text_delta":
                             live_text += delta.get("text", "")
+                        elif dt == "thinking_delta":
+                            # 思考摘要（需 thinking display="summarized"，見 _build_options）
+                            live_think += delta.get("thinking", "")
                     continue
                 messages.append(message)
                 if isinstance(message, ResultMessage):
@@ -1349,6 +1371,7 @@ async def run_claude(
     # 並記錄這輪動過幾個工具——存進 by-channel dict 供 on_message 讀取（不改回傳簽章）。
     _last_turn_used_tool[state._cid] = tool_count > 0
     _last_turn_done[state._cid] = bool(_DONE_RE.search(content or live_text or ""))
+    _last_turn_wait[state._cid] = bool(_WAIT_RE.search(content or live_text or ""))
     reply = _clean_reply(content)
     # 上游 #50597（Opus 工具回合後偶爾把回合末則 text 掉成空 thinking、stop=end_turn，
     # 文字有 stream 出來卻沒進最終訊息物件）→ 用串流累積的 live_text 回收，避免整段回覆消失。
@@ -3253,11 +3276,14 @@ async def on_message(message: discord.Message) -> None:
         # 未完成自動續跑（plan B）：這輪動過工具、卻沒打完成標記 [[DONE]]、也不在問使用者
         # → 極可能是任務被截斷（上游 #50597）或半途停手。用中性指令補跑，最多 MAX_AUTO_CONTINUE 次。
         # 中性話術讓「其實已完成、只是忘打標記」的情況無害吸收：CC 只會回 [[DONE]] 就停，不會被逼著亂做。
+        # [[WAIT]] 也要排除：CC 用純文字問問題時 ask_data 為空（AskUserQuestion 未必在工具清單裡），
+        # 少了這個判斷會把「正在等使用者回答」當成早停而補跑，逼 CC 自問自答。
         _cont = 0
         while (_cont < MAX_AUTO_CONTINUE
                and not ask_data
                and reply and reply != _NO_RESPONSE
                and _last_turn_used_tool.get(state._cid)
+               and not _last_turn_wait.get(state._cid)
                and not _last_turn_done.get(state._cid)):
             _cont += 1
             cont_msg = await message.channel.send(t("thinking"))

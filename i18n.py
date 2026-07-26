@@ -26,7 +26,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "retry_notice": "⚠️ **{kind}**, auto-retrying in {delay}s ({n}/{max})...",
         "no_response": "(no response)",
         "empty_retry_nudge": "(Your previous turn ended with internal thinking only and produced no visible text. Write out your full reply as plain text now.)",
-        "continue_nudge": "(If the whole task is already complete, output [[DONE]] and nothing else. If there are still steps you announced but have not carried out, continue and finish them now.)",
+        "continue_nudge": "(The system detected your previous turn may have been truncated. If steps remain unexecuted, continue and finish them now; if it is in fact complete, reply [[DONE]]; if you are waiting for the user to answer a question, reply [[WAIT]].)",
         # 段落摺疊統計行（桌面版風格過程顯示）的零件
         "seg_read": "read {n} file(s)",
         "seg_search": "{n} search(es)",
@@ -84,13 +84,15 @@ _STRINGS: dict[str, dict[str, str]] = {
             "first say in one short sentence, in the interface language, what the phase does and why; within the same phase you may run several related tool calls in a row without narrating each one. "
             "Before changing direction, after an important discovery, or before any destructive or irreversible action, start a new sentence of narration. "
             "Going through the whole task silently is not acceptable; but do not write one sentence per tiny tool call either — align narration with the turning points of your reasoning. "
-            "[Keep going until done] This is the highest-priority rule: carry a task the user gives you through to actual completion before ending the turn. "
-            "Within a single turn, as long as any step you announced — or that the task itself implies — is still not carried out, you must not end the turn or hand control back. "
-            "A turn may end in only two cases: (1) the whole task is genuinely complete and you output [[DONE]], or (2) you must use AskUserQuestion to proceed; otherwise always keep going. "
-            "Do not merely announce a plan (e.g. 'let me first do X', 'next I'll handle Y') or stop after one or two steps and hand control back — "
-            "the bot shows the ended turn as 'done', so the user thinks it is complete when it is not and has to keep typing 'continue'. "
-            "[Completion marker] When the whole task is genuinely finished, output [[DONE]] on its own line at the very end of your reply; the bot strips it before the user sees it. "
-            "Especially after you have used tools to carry out a task and it is fully complete, always end with [[DONE]] — otherwise the bot assumes there is more to do and nudges you to continue."
+            "[Keep going until done] Carry a task through to actual completion before ending the turn; "
+            "do not merely announce a plan (e.g. 'let me first do X', 'next I'll handle Y') and hand control back. "
+            "[End-of-turn marker] Whenever you end a turn, mark your state — one of two: "
+            "the whole task is genuinely complete, output [[DONE]] on its own line at the very end; "
+            "you asked the user something and must wait for their answer to proceed, output [[WAIT]] on its own line at the very end. "
+            "You may ask via the AskUserQuestion tool, but it is not always present in your tool list; "
+            "without it, ask in plain text and end with [[WAIT]] to signal you are waiting. "
+            "The bot strips both markers before the user sees them. With no marker at all the bot assumes "
+            "you were truncated and nudges you to continue, so do not omit the marker that applies."
         ),
         # 跨頻道協作（AI Lounge）。coord_rule 會在啟用時附加到 system_prompt 後面，
         # 因此一律用文字描述、不嵌入反引號/錢字號等會破壞 Windows init 的危險字元。
@@ -432,7 +434,8 @@ _STRINGS: dict[str, dict[str, str]] = {
             "• 📥 the top line echoes the command being processed — verify it's really yours\n"
             "• 💬 the second line shows the conversation title and model in use\n"
             "• each step is one narration line, with a small gray summary underneath (files read, commands run, +added −removed lines)\n"
-            "• ⚠️ lines are destructive commands, always shown in full so you can verify them; ✍️ means the reply is being generated\n"
+            "• ⚠️ lines are destructive commands, always shown in full so you can verify them\n"
+            "• 💭 is the model's current thinking summary, ✍️ means it is already writing the reply — this line tells you which stage it is at\n"
             "\n"
             "**Stop mid-task**: `/stop` halts the current job immediately.\n"
             "**Resume**: `/continue` picks up the previous session; see `/guide Conversations` for more.\n"
@@ -546,7 +549,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "retry_notice": "⚠️ **{kind}**，{delay}s 後自動重試（{n}/{max}）...",
         "no_response": "（無回應）",
         "empty_retry_nudge": "（你上一回合只有內部思考、沒有輸出任何文字就結束了。請現在把要回覆的內容完整用文字寫出來。）",
-        "continue_nudge": "（若整個任務已經完成，請只輸出 [[DONE]]、不要多做。若還有你宣告過卻尚未執行的步驟，請現在繼續把它們做完。）",
+        "continue_nudge": "（系統偵測到你上一回合可能被截斷。若還有尚未執行的步驟，請現在繼續做完；若其實已經完成，回 [[DONE]]；若你正在等使用者回答問題，回 [[WAIT]]。）",
         # 段落摺疊統計行（桌面版風格過程顯示）的零件
         "seg_read": "讀 {n} 個檔案",
         "seg_search": "搜尋 {n} 次",
@@ -604,13 +607,15 @@ _STRINGS: dict[str, dict[str, str]] = {
             "先用一句簡短中文說明這個階段要做什麼、為什麼；同一階段內可以連續執行多個相關的工具呼叫，中間不必逐一說明。"
             "換方向、有重要發現、或要執行破壞性／不可逆操作之前，必須另起一句新的說明。"
             "整個任務悶著頭不講話不行；但也不要為每一個小工具呼叫各講一句——說明要對齊思路的轉折點。"
-            "【持續執行到完成】這是最高優先規則：使用者交給你的任務要一路做到真正完成，再結束這一回合。"
-            "在同一個回合裡，只要還有你宣告過、或任務本身隱含而尚未執行的步驟，就絕對不可以結束回合、把控制權交回。"
-            "回合只允許在兩種情況下結束：一是整個任務已真正完成並輸出 [[DONE]]，二是你必須用 AskUserQuestion 問使用者才能繼續；除此之外一律繼續做下去。"
-            "不要只宣告計畫（例如「我先來做X」「接下來處理Y」）、或做一兩步就停下來把控制權交回——"
-            "bot 會把結束的回合顯示成『完成』，使用者會以為做完了、其實沒有，只能一直打「繼續」。"
-            "【完成標記】整個任務真正完成時，在回覆的最後單獨輸出 [[DONE]]，bot 會在使用者看到前把它清掉。"
-            "尤其當你動用工具執行任務、且已全部完成時，務必以 [[DONE]] 結尾——否則 bot 會以為還沒做完而請你繼續。"
+            "【持續執行到完成】任務要一路做到真正完成再結束回合，不要只宣告計畫"
+            "（例如「我先來做X」「接下來處理Y」）就把控制權交回。"
+            "【回合結束標記】結束回合時一定要用標記說明你的狀態，二選一："
+            "整個任務已真正完成 → 在回覆最後單獨輸出 [[DONE]]；"
+            "你問了使用者問題、必須等他回答才能繼續 → 在回覆最後單獨輸出 [[WAIT]]。"
+            "問問題可以用 AskUserQuestion 工具，但它未必出現在你的工具清單裡；"
+            "沒有它就用純文字問，並以 [[WAIT]] 收尾表示你在等回覆。"
+            "兩個標記 bot 都會在使用者看到前清掉。完全沒有標記時，"
+            "bot 會判斷你是被截斷而請你繼續，因此該打的標記別漏。"
         ),
         # 跨頻道協作（AI Lounge）。coord_rule 啟用時會附加到 system_prompt 後面，
         # 因此一律用文字描述、不嵌入反引號/錢字號等會破壞 Windows init 的危險字元。
@@ -936,7 +941,8 @@ _STRINGS: dict[str, dict[str, str]] = {
             "• 📥 頂部那行是「正在處理的指令原文」，可核對它跑的是不是你說的話\n"
             "• 💬 第二行是目前對話標題與使用的模型\n"
             "• 每一步是一句說明，底下一行小灰字統計這步做了什麼（讀幾個檔、跑幾個指令、增刪多少行）\n"
-            "• ⚠️ 開頭是破壞性指令，一律完整列出讓你核對；✍️ 是回覆生成中\n"
+            "• ⚠️ 開頭是破壞性指令，一律完整列出讓你核對\n"
+            "• 💭 是模型當下的思考摘要，✍️ 是已經在寫回覆了——看這行就知道它卡在哪個階段\n"
             "\n"
             "**中途想停**：`/stop` 立即中止目前工作。\n"
             "**接續舊話**：`/continue` 恢復上一段 session；更多見 `/guide 對話管理`。\n"
