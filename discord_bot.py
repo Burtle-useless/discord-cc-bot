@@ -676,6 +676,16 @@ def _append_trace_line(trace: str, line: str) -> str:
         return f"{head}{sep}{base} ×{n + 1}"
     return f"{trace}\n{line}"
 
+def _think_digest(s: str, limit: int = 220) -> str:
+    """思考摘要壓成軌跡用的一行：壓掉換行與多餘空白、去反引號、超長截尾。純函式。
+
+    底部狀態列的思考尾段是「流動」的（下一步一到就被蓋掉、看不回來），這個是定稿版本，
+    讓使用者事後仍捲得到模型每一步在想什麼。反引號要換掉：思考常含程式碼片段，
+    截尾容易留下未閉合的反引號，會吃掉整則訊息的格式。
+    """
+    x = " ".join(s.split()).replace("`", "'")
+    return x if len(x) <= limit else x[:limit] + "…"
+
 # ── 段落摺疊統計（桌面版風格的過程顯示）─────────────────────────────────
 # 一段＝CC 的一句說明＋其下所有工具呼叫。工具不再逐行列出，收成一行小灰字統計
 #（Discord 的 -# 子文字），仿 Claude 桌面版的摺疊列。破壞性指令是唯一例外：
@@ -1185,6 +1195,12 @@ async def run_claude(
         content = getattr(am, "content", [])
         if not isinstance(content, list):
             return
+        # 思考摘要定稿進軌跡：狀態列那行會被下一步蓋掉（流動），這裡留一行固定紀錄。
+        # 不論這步有沒有動工具都留——純思考的步驟原本整步被丟掉，思考就跟著消失了。
+        if live_think.strip():
+            _flush_seg()        # 先收上一段的工具統計，思考才排在它底下、對得上時序
+            trace = _append_trace_line(trace, f"-# 💭 {_think_digest(live_think)}")
+            live_think = ""     # 已定稿 → 清掉，下一步重新累積
         has_tool = any(isinstance(b, ToolUseBlock) for b in content)
         if not has_tool:
             return                      # 無工具（純思考／純正式回應）：留給 reply，不進軌跡
@@ -1211,8 +1227,8 @@ async def run_claude(
                     _flush_seg()
                     trace = _append_trace_line(trace, txt[:400])
         # 這步已定稿進軌跡 → 清即時尾段，下一步重新累積
+        #（live_think 已在函式開頭定稿後清掉，這裡只處理 live_text）
         live_text = ""
-        live_think = ""
 
     _spinner = ["🌑","🌒","🌓","🌔","🌕","🌖","🌗","🌘"]
 

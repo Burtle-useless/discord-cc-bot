@@ -228,6 +228,21 @@ def test_turn_end_markers() -> None:
     ok("[[DONE]] / [[WAIT]] 回合結束標記")
 
 
+def test_think_digest() -> None:
+    """思考摘要壓成軌跡一行：壓掉換行與多餘空白、去反引號、超長截尾。
+
+    反引號一定要換掉——思考常含程式碼片段，截尾留下未閉合的反引號會吃掉
+    整則 Discord 訊息的格式，故釘住。
+    """
+    assert d._think_digest("a\n\n  b   c") == "a b c"
+    assert d._think_digest("用 `code` 寫") == "用 'code' 寫"
+    assert d._think_digest("") == ""
+    out = d._think_digest("字" * 500, limit=220)
+    assert len(out) == 221 and out.endswith("…")   # 220 + 省略號
+    assert "`" not in d._think_digest("開頭 `未閉合")
+    ok("思考摘要壓行 _think_digest")
+
+
 def test_channel_state() -> None:
     """ChannelState：預設值、slots fail-loud（打錯欄位名立刻炸，不靜默）。"""
     st = d.get_state(999_999_999)
@@ -392,6 +407,7 @@ def main() -> None:
     test_fold_messages()
     test_clean_reply()
     test_turn_end_markers()
+    test_think_digest()
     test_channel_state()
     test_purge_title_shell()
     test_bar_clamp()
