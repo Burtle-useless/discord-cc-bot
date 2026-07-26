@@ -69,6 +69,24 @@ def test_context_limit_for() -> None:
     ok("context_limit_for 官方三規則")
 
 
+def test_thinking_config_sdk_compatible() -> None:
+    """thinking 設定必須與 SDK 相容——這是靜默失效點，改壞了語法檢查抓不到，
+    只在使用者發訊息、建 client 時整隻炸（上一版實際癱瘓過整隻 bot）。
+
+    禁用 type=="enabled"：SDK subprocess_cli 對它無條件讀 t["budget_tokens"] 組
+    --max-thinking-tokens，沒帶就 KeyError；而 budget_tokens 自 Opus 4.7 起已從 API
+    移除（Opus 5／Fable 5／Sonnet 5 收到會 400），補上鍵也無解。
+    禁用 type=="disabled"：Fable 5 思考強制開啟，收到 disabled 會 400 —— 逃生門要用
+    「省略參數」（None）而非 disabled。"""
+    st = d.ChannelState(_cid=1, cwd=d.DEFAULT_DIR)
+    th = d._build_options(st).thinking
+    assert th is not None and th["type"] == "adaptive", f"正常路徑必須用 adaptive，收到 {th}"
+    assert th.get("display") == "summarized", "需要 summarized 才拿得到思考文字"
+    st._no_think = True
+    assert d._build_options(st).thinking is None, "關思考逃生門必須省略參數，不可傳 disabled"
+    ok("thinking 設定與 SDK 相容（禁 enabled／disabled）")
+
+
 def test_effective_settings() -> None:
     """model/effort 三層優先序：對話覆寫 → 帳號預設 → 內建後備（帳號預設功能的核心）。"""
     prev_m, prev_e = d._default_model, d._default_effort
@@ -265,20 +283,20 @@ def test_no_think_flag() -> None:
 
     ①『_no_think 必須影響 client 指紋』是沉默失效點：指紋沒變 → _acquire_client
       直接沿用舊 client → 關思考完全沒生效，而且不會有任何錯誤訊息。故釘死。
-    ② thinking=disabled 時不可帶 display（兩者互斥），且預設必須是
-      enabled+summarized——不是 adaptive（上游 #74260 會丟棄回合中段文字）。"""
+    ② 關思考要用「省略參數」而非 {"type":"disabled"}：Fable 5 思考強制開啟，
+      收到 disabled 會 400。預設路徑則必須是 adaptive+summarized——enabled 會讓
+      SDK 讀不到 budget_tokens 而 KeyError（詳見 test_thinking_config_sdk_compatible）。"""
     st = d.get_state(999_999_998)
     try:
         assert st._no_think is False              # 預設一定要是「思考開著」
         sig_on = d._client_sig(st)
         st._no_think = True
         assert d._client_sig(st) != sig_on        # ← 沉默失效點：指紋必須跟著變
-        opt_off = d._build_options(st)
-        assert opt_off.thinking == {"type": "disabled"}   # disabled 不可帶 display
+        assert d._build_options(st).thinking is None      # 省略參數，不可傳 disabled
         st._no_think = False
         assert d._client_sig(st) == sig_on        # 還原後指紋要回到原樣
         assert d._build_options(st).thinking == {
-            "type": "enabled", "display": "summarized"}
+            "type": "adaptive", "display": "summarized"}
     finally:
         d._sessions.pop(999_999_998, None)
     ok("關思考逃生門：指紋連動與 thinking 參數")
@@ -423,6 +441,7 @@ def test_atomic_write_text() -> None:
 def main() -> None:
     test_classify_cc_error()
     test_context_limit_for()
+    test_thinking_config_sdk_compatible()
     test_effective_settings()
     test_chunk_text()
     test_needs_confirm()

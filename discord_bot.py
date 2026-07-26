@@ -572,18 +572,19 @@ def _build_options(state: ChannelState) -> ClaudeAgentOptions:
         # 思考摘要：Opus 4.7+ 預設 display="omitted"（只回簽章、沒有文字），這是
         # 過程訊息「思考中」永遠空白的根因。改 "summarized" 才拿得到思考文字。
         #
-        # 用 enabled 而非 adaptive：上游 #74260（open，標記為 data-loss）指出在
-        # adaptive／interleaved 思考下，回合結構為 thinking→text→thinking→tool_use 時
-        # 中間那個 text 塊會被靜默丟棄——不顯示、也不寫進 transcript。這正是「回覆
-        # 整段消失」的形狀之一。enabled 是固定思考、不交錯，不觸發該模式。
-        # 相關：#50597（thinking-only 回應、token 照燒但內容遺失）已被官方 closed as
-        # not planned → client 端兜底是唯一的路，不要再等上游修。
+        # 必須用 adaptive，不能用 enabled（上一版用 enabled 導致 bot 全面癱瘓）：
+        # SDK subprocess_cli.py 對 type=="enabled" 無條件讀 t["budget_tokens"] 組
+        # --max-thinking-tokens，沒帶就 KeyError，每次建 client 必炸。而 budget_tokens
+        # 自 Opus 4.7 起已從 API 移除，Opus 5／Fable 5／Sonnet 5 收到它一律回 400——
+        # 補上鍵也無解，enabled 在現代模型上就是死路。
+        # 代價：#74260（adaptive 交錯思考丟失回合中段 text）仍在，靠 run_claude 的
+        # live_text 兜底與空回覆重試處理，不能靠 enabled 規避。
         #
-        # _no_think 是重試逃生門：連續拿到 thinking-only 空回覆時關掉思考重跑。
-        # LiteLLM／n8n／pi 三個獨立專案的結論一致——關掉思考是唯一公認有效的
-        # workaround。這是確定性手段，不像改 prompt 那樣要跟模型拔河。
-        thinking=({"type": "disabled"} if state._no_think
-                  else {"type": "enabled", "display": "summarized"}),
+        # _no_think 是重試逃生門（連續 thinking-only 空回覆時關思考重跑）：省略參數
+        # 而非傳 {"type":"disabled"}——disabled 在 Fable 5 會 400（該模型思考強制開啟）。
+        # 省略後 Opus／Sonnet 系不思考（正是逃生門要的），Fable 5 退回 adaptive 也不會炸。
+        thinking=(None if state._no_think
+                  else {"type": "adaptive", "display": "summarized"}),
     )
     # 開啟逐字串流，讓生成中的思考／回應能即時顯示在「思考中」訊息，提供存活訊號
     options.include_partial_messages = True
