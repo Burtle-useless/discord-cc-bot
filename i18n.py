@@ -530,8 +530,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         "thinking": "⏳ **Thinking...**",
         "thinking_inline": "Thinking",
         "generating": "✍️ generating `{n} chars`",
-        # 等背景任務（run_in_background 的長工作）時的狀態列，避免看起來像當掉
-        "bg_task_waiting": "⏳ background work running (`{n}`) `{sec}s` — will continue automatically　> {desc}",
+        # 有背景工作在跑時的狀態列。本回合不會為它停留，故不承諾「完成後自動接著做」
+        "bg_task_running": "⏳ background work running (`{n}`)　> {desc}",
         "notify_need_answer": "needs your answer",
         "notify_done": "done",
         "notify_error": "{mention} ⚠️ Ended (an error occurred)",
@@ -1042,8 +1042,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         "thinking": "⏳ **思考中...**",
         "thinking_inline": "思考中",
         "generating": "✍️ 生成中 `{n} 字`",
-        # 等背景任務（run_in_background 的長工作）時的狀態列，避免看起來像當掉
-        "bg_task_waiting": "⏳ 背景工作進行中（`{n}` 個）已等 `{sec}` 秒，完成後會自動接著做　> {desc}",
+        # 有背景工作在跑時的狀態列。本回合不會為它停留，故不承諾「完成後自動接著做」
+        "bg_task_running": "⏳ 背景工作進行中（`{n}` 個）　> {desc}",
         "notify_need_answer": "需要你回答",
         "notify_done": "完成",
         "notify_error": "{mention} ⚠️ 已結束（發生錯誤）",
