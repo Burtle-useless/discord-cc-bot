@@ -1050,10 +1050,13 @@ _STRINGS: dict[str, dict[str, str]] = {
     },
 }
 
-def t(key: str, **kw) -> str:
-    """取目前語言的字串；缺鍵退回英文，有具名參數則套用 .format。"""
-    s = _STRINGS.get(BOT_LANG, _STRINGS["en"]).get(key)
+def t(_key: str, **kw) -> str:
+    """取目前語言的字串；缺鍵退回英文，有具名參數則套用 .format。
+
+    參數名刻意加底線：字串模板本身可能有名為 {key} 的佔位符（如 require_env），
+    呼叫端寫 t("require_env", key=...) 時會與位置參數撞名而炸 TypeError。"""
+    s = _STRINGS.get(BOT_LANG, _STRINGS["en"]).get(_key)
     if s is None:
-        s = _STRINGS["en"].get(key, key)
+        s = _STRINGS["en"].get(_key, _key)
     return s.format(**kw) if kw else s
 

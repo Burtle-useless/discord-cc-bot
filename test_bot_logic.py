@@ -70,21 +70,42 @@ def test_context_limit_for() -> None:
 
 
 def test_thinking_config_sdk_compatible() -> None:
-    """thinking 設定必須與 SDK 相容——這是靜默失效點，改壞了語法檢查抓不到，
-    只在使用者發訊息、建 client 時整隻炸（上一版實際癱瘓過整隻 bot）。
+    """把 _build_options 的產物交給 SDK 實際組指令——只有這個形狀抓得到上一版那顆雷。
 
-    禁用 type=="enabled"：SDK subprocess_cli 對它無條件讀 t["budget_tokens"] 組
-    --max-thinking-tokens，沒帶就 KeyError；而 budget_tokens 自 Opus 4.7 起已從 API
-    移除（Opus 5／Fable 5／Sonnet 5 收到會 400），補上鍵也無解。
-    禁用 type=="disabled"：Fable 5 思考強制開啟，收到 disabled 會 400 —— 逃生門要用
-    「省略參數」（None）而非 disabled。"""
+    為什麼不能只斷言回傳值等於某字面值：那種測試的唯一真理來源就是原始碼本身，
+    改壞的人會連測試一起改。上一版就是這樣——把 thinking 改成 enabled、順手把
+    斷言也改成 enabled，測試全綠，bot 卻對每則訊息都回「未預期錯誤」。
+    這裡讓 SDK 自己消化參數：enabled 缺 budget_tokens 會當場在 _build_command()
+    內 KeyError，測試直接紅給你看。"""
+    from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
+
+    def cli_args(state) -> list[str]:
+        tr = SubprocessCLITransport(prompt="ping", options=d._build_options(state))
+        tr._cli_path = "claude"      # CI 上沒裝 CLI，塞個假路徑就能純組指令
+        return tr._build_command()
+
+    def flag(cmd: list[str], name: str) -> str | None:
+        return cmd[cmd.index(name) + 1] if name in cmd else None
+
     st = d.ChannelState(_cid=1, cwd=d.DEFAULT_DIR)
-    th = d._build_options(st).thinking
-    assert th is not None and th["type"] == "adaptive", f"正常路徑必須用 adaptive，收到 {th}"
-    assert th.get("display") == "summarized", "需要 summarized 才拿得到思考文字"
+    cmd = cli_args(st)
+    assert flag(cmd, "--thinking") == "adaptive", f"正常路徑要 adaptive，實得 {cmd}"
+    assert flag(cmd, "--thinking-display") == "summarized"   # 沒有它就拿不到思考文字
+    # budget_tokens 自 Opus 4.7 起已從 API 移除（Opus 5／Fable 5／Sonnet 5 收到會 400），
+    # 這個參數一旦出現就代表有人又用了 enabled
+    assert "--max-thinking-tokens" not in cmd
+
+    # 關思考逃生門依模型分流：非 Fable 系要真的關掉（省略參數只是不吐文字、照樣思考）
     st._no_think = True
-    assert d._build_options(st).thinking is None, "關思考逃生門必須省略參數，不可傳 disabled"
-    ok("thinking 設定與 SDK 相容（禁 enabled／disabled）")
+    st.model = "claude-opus-4-8"
+    assert flag(cli_args(st), "--thinking") == "disabled"
+    # Fable／Mythos 思考強制開啟，disabled 會 400 → 退回 adaptive，且保留 summarized
+    # 讓思考摘要仍拿得到（第三層兜底靠它當回覆）
+    st.model = "claude-fable-5"
+    cmd_f = cli_args(st)
+    assert flag(cmd_f, "--thinking") == "adaptive", "Fable 系不可送 disabled（會 400）"
+    assert flag(cmd_f, "--thinking-display") == "summarized"
+    ok("thinking 設定經 SDK 實際組指令驗證（含關思考分流）")
 
 
 def test_effective_settings() -> None:
@@ -283,16 +304,15 @@ def test_no_think_flag() -> None:
 
     ①『_no_think 必須影響 client 指紋』是沉默失效點：指紋沒變 → _acquire_client
       直接沿用舊 client → 關思考完全沒生效，而且不會有任何錯誤訊息。故釘死。
-    ② 關思考要用「省略參數」而非 {"type":"disabled"}：Fable 5 思考強制開啟，
-      收到 disabled 會 400。預設路徑則必須是 adaptive+summarized——enabled 會讓
-      SDK 讀不到 budget_tokens 而 KeyError（詳見 test_thinking_config_sdk_compatible）。"""
+    ② 關思考的實際參數依模型分流，由 _thinking_off 決定（見
+      test_thinking_config_sdk_compatible，那裡用 SDK 實際組指令驗證）。這裡只驗指紋連動。"""
     st = d.get_state(999_999_998)
     try:
         assert st._no_think is False              # 預設一定要是「思考開著」
         sig_on = d._client_sig(st)
         st._no_think = True
         assert d._client_sig(st) != sig_on        # ← 沉默失效點：指紋必須跟著變
-        assert d._build_options(st).thinking is None      # 省略參數，不可傳 disabled
+        assert d._build_options(st).thinking == d._thinking_off(st)
         st._no_think = False
         assert d._client_sig(st) == sig_on        # 還原後指紋要回到原樣
         assert d._build_options(st).thinking == {

@@ -535,6 +535,19 @@ def get_state(cid: int) -> ChannelState:
     return _sessions[cid]
 
 # ── 長駐 client（A'）輔助函式 ───────────────────────────────────────────
+def _thinking_off(state: ChannelState) -> dict:
+    """關思考逃生門要送的 thinking 設定，依模型分流。純函式，供測試直接驗。
+
+    非 Fable／Mythos：{"type":"disabled"}——實測只有它能真的關掉思考（省略參數
+    僅把 display 退回 omitted，思考照跑）。
+    Fable／Mythos：思考強制開啟，收到 disabled 會 400，只能退回 adaptive；保留
+    summarized 讓思考摘要仍拿得到，第三層兜底才有素材可用。"""
+    m = (_eff_model(state) or "").lower()
+    if "fable" in m or "mythos" in m:
+        return {"type": "adaptive", "display": "summarized"}
+    return {"type": "disabled"}
+
+
 def _build_options(state: ChannelState) -> ClaudeAgentOptions:
     """依頻道狀態組出 ClaudeAgentOptions（建立長駐 client 時用一次）。"""
     # cwd 防護：切換歷史 session 可能帶入不存在的目錄（WinError 267），退回預設目錄
@@ -580,10 +593,12 @@ def _build_options(state: ChannelState) -> ClaudeAgentOptions:
         # 代價：#74260（adaptive 交錯思考丟失回合中段 text）仍在，靠 run_claude 的
         # live_text 兜底與空回覆重試處理，不能靠 enabled 規避。
         #
-        # _no_think 是重試逃生門（連續 thinking-only 空回覆時關思考重跑）：省略參數
-        # 而非傳 {"type":"disabled"}——disabled 在 Fable 5 會 400（該模型思考強制開啟）。
-        # 省略後 Opus／Sonnet 系不思考（正是逃生門要的），Fable 5 退回 adaptive 也不會炸。
-        thinking=(None if state._no_think
+        # _no_think 是重試逃生門（連續 thinking-only 空回覆時關思考重跑），按模型分流：
+        # 要「真的」關思考只能傳 disabled——實測省略參數只是把 display 退回預設 omitted，
+        # 模型照樣思考、只是不吐文字，逃生門等於沒生效（上一版一度誤判為可行）。
+        # 但 Fable／Mythos 思考強制開啟、收到 disabled 會 400，故該系列退回 adaptive 並
+        # 保留 summarized：關不掉就至少讓思考摘要留下來，供第三層兜底當回覆用。
+        thinking=(_thinking_off(state) if state._no_think
                   else {"type": "adaptive", "display": "summarized"}),
     )
     # 開啟逐字串流，讓生成中的思考／回應能即時顯示在「思考中」訊息，提供存活訊號
@@ -1388,19 +1403,22 @@ async def run_claude(
                 await anim_task   # 等取消塵埃落定，避免 _roll_message 半途狀態與下面收尾交錯
             except BaseException:
                 pass
-        # 過程訊息收尾：成功才把當前那則定稿成純軌跡永久保留（無軌跡＝簡單問答則刪掉不留殘訊）。
+        # 過程訊息收尾：成功才把當前那則定稿成軌跡永久保留（純問答則刪掉不留殘訊）。
         # 失敗（逾時／中斷／例外）不動它，保留現況與 state._live_msg，讓 on_message 在同一則上顯示錯誤。
         if ok:
             _flush_seg()   # 最後一段收尾：後面沒有下一句說明來觸發，這裡補收統計行
             if cur_msg:
                 _final = trace.strip()
                 try:
-                    if _final:
-                        await cur_msg.edit(content=_final[:1990])
-                    elif tool_count == 0:
-                        # 只有「純問答、沒動過工具」才刪過程訊息；動過工具卻拿到空軌跡
-                        # ＝滾動換訊息半途被取消的競態，保留舊訊息現況、不誤刪已凍結的軌跡
+                    if tool_count == 0:
+                        # 純問答不留殘訊：即使有思考摘要也刪。答案本身就在回覆裡，多留一則
+                        # 只有一行 💭 的訊息在手機上很吵。思考摘要進軌跡是為了「動工具的長
+                        # 工作」看得到每步在想什麼，一問一答不需要。
+                        # 反過來：動過工具卻拿到空軌跡＝滾動換訊息半途被取消的競態，
+                        # 走下面的 edit／不動，不誤刪已凍結的軌跡。
                         await cur_msg.delete()
+                    elif _final:
+                        await cur_msg.edit(content=_final[:1990])
                 except Exception:
                     pass
             state._live_msg = None
@@ -3313,27 +3331,35 @@ async def on_message(message: discord.Message) -> None:
         #          ③ 全數失敗就拿思考摘要當回覆，別丟「無回應」讓整回合的推理白費
         # 每次重試都讓使用者看到「正在重試第幾次」，不再靜默空白（那才是最像壞掉的樣子）。
         _empty = 0
+        # 兜底素材自己保管：_last_turn_think 每回合被無條件覆寫，而關思考的重試拿不到
+        # 思考文字，會把前面那份有內容的摘要洗成空字串——第三層因此永遠讀到空值、形同
+        # 死碼。這裡逐輪留下最長的一份，作用域鎖在本回合，不會拿到別回合的思考亂貼。
+        _best_think = (_last_turn_think.get(message.channel.id) or "").strip()
         try:
             while reply == _NO_RESPONSE and not ask_data and _empty < MAX_EMPTY_RETRY:
                 _empty += 1
                 # 第一次仍帶思考（多半一次就過）；再失敗才動用關思考的逃生門。
                 # 旗標在迴圈外統一還原：留在迴圈內逐次還原會讓 client 每輪多重建一次。
                 state._no_think = _empty >= 2
-                retry_msg = await message.channel.send(t(
+                # 重試提示另發一則獨立訊息：傳給 run_claude 當畫布的那則會在 1.5 秒內
+                # 被進度動畫整段覆寫、收尾時還可能被刪，計數就這樣沒了。
+                await message.channel.send(t(
                     "empty_retry_note_nothink" if state._no_think else "empty_retry_note",
                     n=_empty, max=MAX_EMPTY_RETRY))
+                retry_msg = await message.channel.send(t("thinking"))
                 reply, sid2, ask_data = await _run_tracked(
                     message.channel.id, t("empty_retry_nudge"), state, retry_msg)
+                _t = (_last_turn_think.get(message.channel.id) or "").strip()
+                if len(_t) > len(_best_think):
+                    _best_think = _t
                 if sid2:
                     state.session_id = sid2
                     _persist_session(state)
         finally:
             # 一定要還原，否則這個頻道從此永久不思考。指紋隨之復原，下次對話自動重建 client。
             state._no_think = False
-        if reply == _NO_RESPONSE and not ask_data:
-            _th = (_last_turn_think.get(message.channel.id) or "").strip()
-            if _th:
-                reply = t("thinking_only_fallback", n=_empty + 1, think=_th[:1500])
+        if reply == _NO_RESPONSE and not ask_data and _best_think:
+            reply = t("thinking_only_fallback", n=_empty + 1, think=_best_think[:1500])
         # 未完成自動續跑（plan B）：這輪動過工具、卻沒打完成標記 [[DONE]]、也不在問使用者
         # → 極可能是任務被截斷（上游 #50597）或半途停手。用中性指令補跑，最多 MAX_AUTO_CONTINUE 次。
         # 中性話術讓「其實已完成、只是忘打標記」的情況無害吸收：CC 只會回 [[DONE]] 就停，不會被逼著亂做。
