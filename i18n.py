@@ -26,6 +26,9 @@ _STRINGS: dict[str, dict[str, str]] = {
         "retry_notice": "⚠️ **{kind}**, auto-retrying in {delay}s ({n}/{max})...",
         "no_response": "(no response)",
         "empty_retry_nudge": "(Your previous turn ended with internal thinking only and produced no visible text. Write out your full reply as plain text now.)",
+        "empty_retry_note": "⚠️ The model produced internal thinking only, with no visible text. Retrying ({n}/{max})...",
+        "empty_retry_note_nothink": "⚠️ Thinking-only again. Retrying with thinking turned off ({n}/{max})...",
+        "thinking_only_fallback": "⚠️ The model produced internal thinking only and no visible text {n} time(s) in a row (known upstream bug, closed as not planned). Here is the last thinking summary it produced, so the work is not lost:\n\n{think}",
         "continue_nudge": "(The system detected your previous turn may have been truncated. If steps remain unexecuted, continue and finish them now; if it is in fact complete, reply [[DONE]]; if you are waiting for the user to answer a question, reply [[WAIT]].)",
         # 段落摺疊統計行（桌面版風格過程顯示）的零件
         "seg_read": "read {n} file(s)",
@@ -549,6 +552,9 @@ _STRINGS: dict[str, dict[str, str]] = {
         "retry_notice": "⚠️ **{kind}**，{delay}s 後自動重試（{n}/{max}）...",
         "no_response": "（無回應）",
         "empty_retry_nudge": "（你上一回合只有內部思考、沒有輸出任何文字就結束了。請現在把要回覆的內容完整用文字寫出來。）",
+        "empty_retry_note": "⚠️ 模型只有內部思考、沒輸出任何文字，正在重試（{n}/{max}）...",
+        "empty_retry_note_nothink": "⚠️ 又是只有思考沒有文字。這次關掉思考功能重試（{n}/{max}）...",
+        "thinking_only_fallback": "⚠️ 模型連續 {n} 次只產出內部思考、沒有輸出可見文字（上游已知 bug，官方標記不修）。以下是它最後留下的思考摘要，至少不讓這回合的工作白費：\n\n{think}",
         "continue_nudge": "（系統偵測到你上一回合可能被截斷。若還有尚未執行的步驟，請現在繼續做完；若其實已經完成，回 [[DONE]]；若你正在等使用者回答問題，回 [[WAIT]]。）",
         # 段落摺疊統計行（桌面版風格過程顯示）的零件
         "seg_read": "讀 {n} 個檔案",

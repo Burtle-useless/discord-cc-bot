@@ -260,6 +260,30 @@ def test_channel_state() -> None:
     ok("ChannelState 預設值與 slots fail-loud")
 
 
+def test_no_think_flag() -> None:
+    """關思考逃生門（thinking-only 空回覆的重試手段）的兩個關鍵不變式。
+
+    ①『_no_think 必須影響 client 指紋』是沉默失效點：指紋沒變 → _acquire_client
+      直接沿用舊 client → 關思考完全沒生效，而且不會有任何錯誤訊息。故釘死。
+    ② thinking=disabled 時不可帶 display（兩者互斥），且預設必須是
+      enabled+summarized——不是 adaptive（上游 #74260 會丟棄回合中段文字）。"""
+    st = d.get_state(999_999_998)
+    try:
+        assert st._no_think is False              # 預設一定要是「思考開著」
+        sig_on = d._client_sig(st)
+        st._no_think = True
+        assert d._client_sig(st) != sig_on        # ← 沉默失效點：指紋必須跟著變
+        opt_off = d._build_options(st)
+        assert opt_off.thinking == {"type": "disabled"}   # disabled 不可帶 display
+        st._no_think = False
+        assert d._client_sig(st) == sig_on        # 還原後指紋要回到原樣
+        assert d._build_options(st).thinking == {
+            "type": "enabled", "display": "summarized"}
+    finally:
+        d._sessions.pop(999_999_998, None)
+    ok("關思考逃生門：指紋連動與 thinking 參數")
+
+
 def test_purge_title_shell() -> None:
     """用完即焚：meta 查詢殘留的空殼（只有 aiTitle、無對話本體）要刪掉，
     有 user/assistant 本體的真實對話一定要留住，None／不存在的 id 不可炸。"""
@@ -409,6 +433,7 @@ def main() -> None:
     test_turn_end_markers()
     test_think_digest()
     test_channel_state()
+    test_no_think_flag()
     test_purge_title_shell()
     test_bar_clamp()
     test_fmt_tool_display()
