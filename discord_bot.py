@@ -25,6 +25,8 @@ from claude_agent_sdk import (
     ToolUseBlock,
     StreamEvent,
     HookMatcher,
+    TaskStartedMessage,
+    TaskNotificationMessage,
 )
 from claude_agent_sdk._errors import MessageParseError
 from claude_agent_sdk._internal.message_parser import parse_message
@@ -454,6 +456,11 @@ MAX_AUTO_CONTINUE = 2
 # 這是最傷的故障：bot 端發生率 6.1%、是 CLI 的 3 倍，且使用者催促率 15.9% 最高。
 # 原本「一次為限」，重試再失敗就放棄，紀錄裡有連續四次空回覆的鬼打牆。
 MAX_EMPTY_RETRY = 3
+# 背景任務（CC 用 run_in_background 起的長工作）等待上限。CLI 會在任務完成時自動把 CC
+# 叫醒、跑一個新回合續做；bot 得留在訊息流裡把那一段接完，否則不只接不到，未讀的訊息
+# 還會殘留、被下一則使用者訊息當成自己的回覆讀走。
+# 這期間本來就長時間沒有輸出，不能套 INACTIVITY_TIMEOUT，否則會被誤判卡死。
+BG_TASK_TIMEOUT = 1800        # 30 分鐘：夠大型下載／編譯跑完，又不會無限卡住頻道
 
 
 async def _run_tracked(
@@ -1206,6 +1213,8 @@ async def run_claude(
     tool_count: int = 0
     seg: dict = _new_seg()   # 進行中的段落統計（目前這句說明底下累積的工具摺疊）
     start = time.time()
+    pending_bg: dict[str, str] = {}   # 進行中的背景任務 {task_id: 描述}；空了才可以收工
+    bg_since: list[float] = [0.0]     # 開始等背景任務的時刻（0＝沒在等），逾時判斷用
     pending_question: dict = {}
     live_text: str = ""  # 生成中累積的回應文字（底部狀態列即時顯示尾段）
     live_think: str = ""  # 本步累積的思考摘要（狀態列顯示尾段，讓使用者看得到模型在想什麼）
@@ -1287,6 +1296,13 @@ async def run_claude(
         _seg_line = _fmt_seg_summary(seg)
         if _seg_line:
             lines.append(_seg_line)
+        # 等背景任務：這期間畫面本來會一片死寂，明講它在等什麼、等多久了，
+        # 免得看起來像當掉（那正是使用者最容易誤判的樣子）
+        if pending_bg:
+            _wait = int(time.time() - bg_since[0]) if bg_since[0] else 0
+            _desc = next(iter(pending_bg.values()), "")[:60].replace("`", "'")
+            lines.append(t("bg_task_waiting", n=len(pending_bg),
+                           sec=_wait, desc=_desc))
         # 生成階段：回應字數 + 即時文字尾段，作為「還活著」的存活訊號。
         # 尚未開始產文字但已有思考摘要＝思考階段，改顯示思考尾段（模型現在在想什麼）。
         if live_text:
@@ -1362,9 +1378,23 @@ async def run_claude(
                             all_think += _td   # 另存全量：live_think 每步定稿後會清空，兜底需要完整的
                     continue
                 messages.append(message)
+                # 背景任務追蹤：CC 用 run_in_background 起的長工作，CLI 會在它完成時
+                # 自動叫醒 CC 續做。這裡記帳，讓下面的 ResultMessage 知道還不能收工。
+                if isinstance(message, TaskStartedMessage):
+                    pending_bg[message.task_id] = message.description or ""
+                    bg_since[0] = bg_since[0] or time.time()
+                elif isinstance(message, TaskNotificationMessage):
+                    pending_bg.pop(message.task_id, None)
+                    if not pending_bg:
+                        bg_since[0] = 0.0
                 if isinstance(message, ResultMessage):
                     _client_used[state._cid] = time.time()  # 標記活躍；client 留池不關
-                    break
+                    if not pending_bg:
+                        break
+                    # 還有背景任務在跑：這則 ResultMessage 只是「啟動那一回合」結束，
+                    # 不是整件事做完。留在迴圈裡等通知，CLI 隨後會自動開新回合續做，
+                    # 那一段照常渲染進軌跡。中途離開的話那些訊息會殘留污染下一則對話。
+                    continue
                 if isinstance(message, AssistantMessage):
                     _commit_step(message)   # 這一步定稿成軌跡的一段（往下累積、不覆蓋前面）
         except Exception:
@@ -1381,7 +1411,14 @@ async def run_claude(
         # 用 asyncio.wait 而非 sleep 輪詢：任務一完成立即返回，回覆不再多等輪詢間隔
         while not client_task.done():
             await asyncio.wait({client_task}, timeout=5)
-            if not client_task.done() and time.time() - last_activity[0] > INACTIVITY_TIMEOUT:
+            if client_task.done():
+                break
+            # 等背景任務期間本來就長時間沒有輸出，套閒置門檻會把它誤殺，
+            # 改用 BG_TASK_TIMEOUT 從「開始等」起算；其餘情況維持原本的閒置判斷。
+            if bg_since[0]:
+                if time.time() - bg_since[0] > BG_TASK_TIMEOUT:
+                    raise asyncio.TimeoutError()
+            elif time.time() - last_activity[0] > INACTIVITY_TIMEOUT:
                 raise asyncio.TimeoutError()
         await client_task  # 完成：取回結果或重新拋出 _run_client 內的例外
         ok = True
