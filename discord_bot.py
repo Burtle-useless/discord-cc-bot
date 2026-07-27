@@ -105,6 +105,12 @@ _coord_registry = coord_core.Registry()   # 記憶體版「頻道→近期活動
 # SIDEBAR_CATEGORY 就不會互搶同一個分類（否則兩個 bot 會一起搶「CC 對話」而衝突）。
 SIDEBAR_CATEGORY = os.environ.get("SIDEBAR_CATEGORY") or t("sidebar_category_default")   # 多 session 側欄的分類容器名
 SIDEBAR_ENTRY    = os.environ.get("SIDEBAR_ENTRY") or t("sidebar_entry_default")           # 側欄最上方的入口頻道名（放常駐按鈕）
+# 側欄分類內對話頻道數上限。Discord 對「單一分類底下的頻道數」有 50 個硬上限，撞到後
+# 任何建頻道請求都會被拒（400 Invalid Form Body / Maximum number of channels in
+# category reached），開新對話直接失敗。故自訂一個較低的軟上限，開新對話前先刪掉最久
+# 沒活動的舊頻道騰空位，永遠不會撞到硬上限。刪頻道只移除 Discord 上的呈現，對話本體是
+# ~/.claude/projects 下的 JSONL，仍可用 /sessions、/search 救回成新頻道。
+SIDEBAR_MAX_CONVOS = 20
 FALLBACK_MODEL  = "claude-sonnet-4-6"      # 主模型過載時的備援模型
 # DEFAULT_MODEL 選填：新對話的預設模型。預設用標準 200K context 的 Sonnet，
 # 所有方案都能跑（不需 1M context credits）。若你的方案有 1M credits 想啟用，
@@ -2049,6 +2055,7 @@ async def _open_sidebar_channel(guild: discord.Guild, category: discord.Category
     """在側欄分類頂端（入口下方）建一個頻道並綁 session；有 title 就直接命名、不再自動改名。
     回傳 channel；缺權限或失敗回 None。"""
     name = _safe_channel_name(title) if title else t("new_chat_channel")
+    await _prune_old_convos(category)   # 先騰出空位，免得撞 Discord 的分類 50 頻道硬上限
     try:
         ch = await guild.create_text_channel(name, category=category, position=1)
     except (discord.Forbidden, Exception) as e:
@@ -2126,6 +2133,34 @@ async def _bump_channel_to_top(channel: discord.TextChannel) -> None:
     except Exception as e:
         print(f"[SIDEBAR] 置頂失敗：{e}", flush=True)
 
+async def _prune_old_convos(category: discord.CategoryChannel, room_for: int = 1) -> None:
+    """開新對話前騰空位：把分類內對話頻道刪到 SIDEBAR_MAX_CONVOS - room_for 個以下。
+
+    刪最下面的——_bump_channel_to_top 保證最新活動的頻道排在入口正下方，故越下面的
+    越久沒活動。正在跑對話的頻道跳過（不刪使用者眼前正在等回覆的那個），改往上找。
+    刪除交給 on_guild_channel_delete 事件善後（清 state、session map、worktree）。
+    """
+    try:
+        convos = [c for c in category.text_channels
+                  if c.id != _sidebar_entry_id and not c.name.startswith("➕")]
+        over = len(convos) - (SIDEBAR_MAX_CONVOS - room_for)
+        if over <= 0:
+            return
+        for ch in reversed(convos):        # 由下往上＝由舊往新
+            if over <= 0:
+                break
+            if _processing.get(ch.id):     # 正在跑對話：留著，改刪上一個
+                continue
+            try:
+                await ch.delete(reason=f"對話頻道上限 {SIDEBAR_MAX_CONVOS}，清理最久未活動的")
+            except Exception as e:
+                print(f"[SIDEBAR] 清理舊頻道失敗（{ch.name}）：{e}", flush=True)
+                continue
+            print(f"[SIDEBAR] 已清理舊對話頻道：{ch.name}", flush=True)
+            over -= 1
+    except Exception as e:
+        print(f"[SIDEBAR] 清理舊頻道失敗：{e}", flush=True)
+
 async def _promote_entry_channel(old_entry: discord.TextChannel) -> bool:
     """『原地開新對話』核心：把當前入口頻道就地轉成一個對話頻道，並另建一個新的
     空白入口頂到最上面。回傳 True＝已轉正（呼叫端接著把使用者這句話當這通新對話的
@@ -2141,6 +2176,9 @@ async def _promote_entry_channel(old_entry: discord.TextChannel) -> bool:
         return False
     _promoting_entry = True
     try:
+        # 0) 先騰空位：舊入口轉正後會多一個對話頻道，且下面還要再建一個新入口，
+        #    分類撞到 Discord 的 50 頻道硬上限就整個轉不了（建入口那步直接 400）。
+        await _prune_old_convos(category)
         # 1) 先建新的空白入口頻道並頂到最上面（先建，確保永遠有入口可用；此步失敗
         #    則舊入口原封不動、直接放棄本次轉正）。名字以 ➕ 開頭，
         #    on_guild_channel_create 會據此跳過、不誤綁成對話 session。
@@ -3242,7 +3280,11 @@ async def on_message(message: discord.Message) -> None:
             and message.author.id in _allowed_users
             and not message.content.startswith("/")):
         if not await _promote_entry_channel(message.channel):
-            return   # 並發重入／缺權限：放掉這則、不做半套處理（使用者重打即可）
+            # 並發重入／缺分類／缺權限：放掉這則、不做半套處理。但要明講——靜默 return
+            # 會讓使用者只看到訊息送出後毫無反應，無從判斷該不該重打（分類撞滿 50 個
+            # 頻道時就這樣吞掉過訊息；該硬上限現已由 _prune_old_convos 擋在前面）。
+            await message.channel.send(t("entry_promote_failed"), delete_after=15)
+            return
         # 轉正成功：此頻道現已在 _allowed_channels，往下照常跑對話流程
     if message.channel.id not in _allowed_channels or message.author.id not in _allowed_users:
         return

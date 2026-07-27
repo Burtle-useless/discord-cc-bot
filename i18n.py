@@ -523,6 +523,8 @@ _STRINGS: dict[str, dict[str, str]] = {
             "**Transparency works for you**: the 📥 command echo guards against \"it's running something else\"; destructive commands are never folded — each gets its own ⚠️ line in full for you to verify; other file edits and commands show up in the gray per-step summaries. Anything looks off — `/stop` any time."
         ),
         "busy_prev": "⏳ Still handling the previous message, please try again shortly.",
+        # 入口頻道轉正失敗時的提示。不能靜默丟棄訊息，否則使用者只看到毫無反應
+        "entry_promote_failed": "⚠️ Couldn't start a new conversation here — your message wasn't processed. Please send it again (if it keeps failing, check the bot log).",
         "heard": "🎤 Heard: {heard}",
         "voice_hint": "(The following was transcribed from voice input and may contain homophones or misrecognized words; please infer my intended meaning from context before responding): {heard}",
         "attach_failed": "❌ Attachment download failed: {failed}",
@@ -1035,6 +1037,8 @@ _STRINGS: dict[str, dict[str, str]] = {
             "**透明化在幫你**：📥 指令核對防「它在跑別的東西」；破壞性指令絕不摺疊，一律以 ⚠️ 單獨完整列出讓你核對；其餘改檔與指令都收在每一步的小灰字統計裡。看到不對勁隨時 `/stop`。"
         ),
         "busy_prev": "⏳ 還在處理上一則訊息，請稍後再試。",
+        # 入口頻道轉正失敗時的提示。不能靜默丟棄訊息，否則使用者只看到毫無反應
+        "entry_promote_failed": "⚠️ 這裡沒能開成新對話，你剛才那則訊息沒有被處理，請重新發一次（若一直失敗請看 bot log）。",
         "heard": "🎤 聽到：{heard}",
         "voice_hint": "（以下內容由語音輸入辨識而來，可能含同音字或辨識錯誤的怪字，請依上下文推斷我的原意再回應）：{heard}",
         "attach_failed": "❌ 附件下載失敗：{failed}",
