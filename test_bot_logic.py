@@ -458,6 +458,77 @@ def test_atomic_write_text() -> None:
     ok("_atomic_write_text 原子寫入與暫存清理")
 
 
+def test_queue_while_busy() -> None:
+    """忙碌排隊：訊息一則都不能掉、提示就地更新計數（不逐則洗版）、合併後保留原順序。
+
+    順序是重點——人在等待時補的話多半在修正前一句，順序反了就會照著錯的做。
+    """
+    import asyncio
+
+    class _FakeSent:
+        def __init__(self, content: str) -> None:
+            self.content = content
+            self.edits: list[str] = []
+
+        async def edit(self, content: str | None = None) -> None:
+            self.content = content or ""
+            self.edits.append(self.content)
+
+    class _FakeChannel:
+        def __init__(self, cid: int) -> None:
+            self.id = cid
+            self.sent: list[_FakeSent] = []
+
+        async def send(self, content: str | None = None, **kw: object) -> _FakeSent:
+            m = _FakeSent(content or "")
+            self.sent.append(m)
+            return m
+
+    class _FakeAuthor:
+        display_name = "鳥龜"
+
+    class _FakeMsg:
+        def __init__(self, ch: _FakeChannel, content: str) -> None:
+            self.channel = ch
+            self.content = content
+            self.author = _FakeAuthor()
+            self.attachments: list[object] = []
+
+    cid = 987654321
+    ch = _FakeChannel(cid)
+    orig_ledger = d._append_user_ledger
+    d._append_user_ledger = lambda *a, **k: None   # 測試不得寫進正式帳本
+    # _enqueue_while_busy 只在「正在忙」時才會被呼叫，且它收尾會檢查這個旗標決定
+    # 要不要自己接手跑一輪——不設的話測試會真的去叫 CC
+    d._processing[cid] = True
+    try:
+        asyncio.run(d._enqueue_while_busy(_FakeMsg(ch, "先做 A")))
+        asyncio.run(d._enqueue_while_busy(_FakeMsg(ch, "等等，改成 B")))
+        assert len(d._queued[cid]) == 2, d._queued.get(cid)
+        assert len(ch.sent) == 1, "第二則要就地編輯既有提示，不該再發一則"
+        assert ch.sent[0].edits, "提示訊息應被編輯成新計數"
+        assert "2" in ch.sent[0].content, ch.sent[0].content
+
+        merged = d._merge_queued(d._queued[cid])
+        assert "[鳥龜]: 先做 A" in merged, merged
+        assert merged.index("先做 A") < merged.index("等等，改成 B"), "合併必須保留先後順序"
+
+        asyncio.run(d._enqueue_while_busy(_FakeMsg(ch, "   ")))
+        assert len(d._queued[cid]) == 2, "空白訊息不該入隊"
+
+        # 取消時提示必須跟著更正：留著「已排隊 2 則」會讓使用者以為它們還會被處理
+        asyncio.run(d._clear_queue(cid))
+        assert cid not in d._queued and cid not in d._queue_note and cid not in d._queued_voice
+        assert cid not in d._queued_author
+        assert "2" in ch.sent[0].content and ch.sent[0].content != ch.sent[0].edits[0], \
+            f"取消後提示未更正：{ch.sent[0].content}"
+    finally:
+        d._append_user_ledger = orig_ledger
+        d._processing.pop(cid, None)
+        asyncio.run(d._clear_queue(cid))
+    ok("忙碌排隊：不丟訊息、提示就地更新、合併保序、取消有交代")
+
+
 def main() -> None:
     test_classify_cc_error()
     test_context_limit_for()
@@ -479,6 +550,7 @@ def main() -> None:
     test_seg_fold()
     test_append_trace_line()
     test_atomic_write_text()
+    test_queue_while_busy()
     print(f"✅ 全部通過（{passed} 項）")
 
 

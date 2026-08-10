@@ -1733,6 +1733,9 @@ async def _run_and_reply(channel: discord.TextChannel, send_text: str,
         await prog.edit(content=t("unexpected_error", detail=detail)[:2000])
     finally:
         _processing[channel.id] = False
+    # 這條路徑不經 on_message，沒有人會回頭消化佇列：使用者在作答後的回合裡補的話
+    # 會一直停在「已排隊 N 則」直到他再講一次。這裡就地接手跑完。
+    await _drain_queue(channel, state)
 
 async def _process_answer(channel: discord.TextChannel, chosen: str, state: ChannelState) -> None:
     # 選項回答：顯示「你選了 X」當過程訊息，實際送給 CC 的也是 chosen
@@ -1962,7 +1965,8 @@ async def _schedule_loop() -> None:
                     continue
                 # 到期 → 執行。頻道正在處理訊息時整輪跳過（不更新 next_run、30 秒後再試），
                 # 執行期間也佔住 _processing——避免兩個 run_claude 同時打進同一個長駐
-                # client 造成串流交錯，也讓使用者訊息收到「處理中」提示而非默默排隊
+                # client 造成串流交錯。此期間使用者的訊息會排進佇列，但這條路徑不會回頭
+                # 消化它（沒有 message 物件可用）：改由使用者下一則訊息把殘留一起帶走。
                 channel = bot.get_channel(s["channel_id"])
                 if channel:
                     cid = s["channel_id"]
@@ -2388,6 +2392,10 @@ async def on_guild_channel_delete(channel: discord.abc.GuildChannel) -> None:
             pass
     _allowed_channels.discard(channel.id)
     _sessions.pop(channel.id, None)
+    _queued.pop(channel.id, None)          # 頻道都沒了，佇列與它的提示訊息參照別留著
+    _queued_voice.discard(channel.id)
+    _queued_author.pop(channel.id, None)
+    _queue_note.pop(channel.id, None)
     await _drop_client(channel.id)   # 關閉並移除該頻道的長駐 client（A'）
     try:
         data = _load_sessions_map()
@@ -3269,133 +3277,243 @@ async def cmd_guide(interaction: discord.Interaction, topic: Optional[str] = Non
     key = f"guide_{topic}" if topic in _GUIDE_KEYS else "guide_overview"
     await interaction.response.send_message(t(key), ephemeral=True)
 
-# ── 一般訊息 → 送給 Claude ──────────────────────────────────────────────
-@bot.event
-async def on_message(message: discord.Message) -> None:
-    if message.author.bot:
-        return
-    # 『原地開新對話』：授權使用者在當前入口頻道打字（非指令）→ 把這個入口就地轉成
-    # 對話頻道、另補一個新空白入口到最上面，再用同一頻道照常處理這句話。
-    if (message.channel.id == _sidebar_entry_id
-            and message.author.id in _allowed_users
-            and not message.content.startswith("/")):
-        if not await _promote_entry_channel(message.channel):
-            # 並發重入／缺分類／缺權限：放掉這則、不做半套處理。但要明講——靜默 return
-            # 會讓使用者只看到訊息送出後毫無反應，無從判斷該不該重打（分類撞滿 50 個
-            # 頻道時就這樣吞掉過訊息；該硬上限現已由 _prune_old_convos 擋在前面）。
-            await message.channel.send(t("entry_promote_failed"), delete_after=15)
-            return
-        # 轉正成功：此頻道現已在 _allowed_channels，往下照常跑對話流程
-    if message.channel.id not in _allowed_channels or message.author.id not in _allowed_users:
-        return
-    if message.content.startswith("/"):   # slash 指令走 interaction 事件，不進 CC
-        return
+# ── 訊息 → 文字（附件下載、簡報轉檔、語音辨識都在這裡收斂）─────────────────
+async def _collect_message_text(message: discord.Message) -> tuple[str, bool]:
+    """把一則 Discord 訊息榨成「要交給 CC 的純文字」，回傳 (文字, 是否來自語音)。
 
-    if _processing.get(message.channel.id):
-        await message.channel.send(t("busy_prev"), delete_after=5)
-        return
-
-    state = get_state(message.channel.id)
+    正常路徑與忙碌排隊路徑共用這一份：排隊時就先把附件存檔、簡報轉 PDF、語音轉逐字稿，
+    佇列裡因此永遠只有純文字，之後合併批次時不必再處理一次附件。
+    回傳空字串代表這則沒有可交付的內容（純附件失敗、或整則是空的）。
+    """
     text = re.sub(r"<@!?\d+>", "", message.content).strip()
+    is_voice = False   # 這則是否來自語音輸入（決定要不要語音回覆）
+    if not message.attachments:
+        return text, is_voice
 
-    # 若有待答選項，使用者打數字 → 對應到選項文字
-    pending = state.pending_options
-    if pending and text.isdigit():
-        idx = int(text) - 1
-        if 0 <= idx < len(pending):
-            chosen = pending[idx]
-            state.pending_options = None
-            await _process_answer(message.channel, chosen, state)
-            return
-
-    _processing[message.channel.id] = True
-    is_voice = False  # 這則是否來自語音輸入（決定要不要語音回覆）
-
-    # 處理附件
-    if message.attachments:
-        tmp_dir = Path(__file__).parent / "tmp"
-        tmp_dir.mkdir(exist_ok=True)
-        saved: list[str] = []
-        failed: list[str] = []
-        voice_texts: list[str] = []
-        voice_blocked = False  # 開車模式關閉時收到語音 → 標記，迴圈後提示
-        for att in message.attachments:
-            # 檔名加短隨機前綴：不同訊息／頻道同時上傳同名檔案時不互相覆蓋（tmp 為共用目錄）
-            dest = tmp_dir / f"{uuid.uuid4().hex[:6]}_{att.filename}"
-            # 語音訊息 → 本機 STT 轉文字（CC 讀不了音訊），不當檔案路徑給 CC
-            if (att.content_type or "").startswith("audio/"):
-                if drive_core is None:
-                    voice_blocked = True  # 語音輸入已與開車模式解耦、永遠可用；只有未裝語音模組才擋
-                    continue
-                try:
-                    await att.save(dest)   # discord.py 原生非同步下載，不阻塞 event loop
-                    transcript = await asyncio.to_thread(drive_core.transcribe, str(dest), t("stt_prompt"))
-                    _last_voice_ts[0] = time.time()   # 記錄語音使用時間，供 Whisper 閒置回收器判斷
-                    if transcript:
-                        voice_texts.append(transcript)
-                except Exception as ex:
-                    failed.append(t("voice_fail", filename=att.filename, ex=ex))
-                finally:
-                    dest.unlink(missing_ok=True)  # 語音輸入音檔只需轉錄一次，用完即刪，不堆積
+    tmp_dir = Path(__file__).parent / "tmp"
+    tmp_dir.mkdir(exist_ok=True)
+    saved: list[str] = []
+    failed: list[str] = []
+    voice_texts: list[str] = []
+    voice_blocked = False  # 未裝語音模組時收到語音 → 標記，迴圈後提示
+    for att in message.attachments:
+        # 檔名加短隨機前綴：不同訊息／頻道同時上傳同名檔案時不互相覆蓋（tmp 為共用目錄）
+        dest = tmp_dir / f"{uuid.uuid4().hex[:6]}_{att.filename}"
+        # 語音訊息 → 本機 STT 轉文字（CC 讀不了音訊），不當檔案路徑給 CC
+        if (att.content_type or "").startswith("audio/"):
+            if drive_core is None:
+                voice_blocked = True  # 語音輸入已與開車模式解耦、永遠可用；只有未裝語音模組才擋
                 continue
             try:
                 await att.save(dest)   # discord.py 原生非同步下載，不阻塞 event loop
-                # 簡報轉 PDF 後給 CC 視覺讀取；轉檔失敗則回退原檔
-                if dest.suffix.lower() in (".ppt", ".pptx"):
-                    pdf = await _convert_pptx(dest)
-                    saved.append(str(pdf) if pdf else str(dest))
-                else:
-                    saved.append(str(dest))
+                transcript = await asyncio.to_thread(drive_core.transcribe, str(dest), t("stt_prompt"))
+                _last_voice_ts[0] = time.time()   # 記錄語音使用時間，供 Whisper 閒置回收器判斷
+                if transcript:
+                    voice_texts.append(transcript)
             except Exception as ex:
-                failed.append(t("attach_fail_item", filename=att.filename, ex=ex))
-        # 語音辨識結果當成使用者打的字
-        if voice_texts:
-            is_voice = True
-            heard = " ".join(voice_texts)
-            await message.channel.send(t("heard", heard=heard))
-            # 顯示給使用者的是乾淨原文；送給 CC 的另外包一層提示，
-            # 標明這是語音辨識結果、可能有怪字，請 CC 依上下文推斷原意
-            text = (text + " " if text else "") + t("voice_hint", heard=heard)
-        # 開車模式關閉時收到語音 → 提示要先開（文字附件仍照常處理）
-        if voice_blocked and not voice_texts:
-            await message.channel.send(t("drive_unavailable"))
-        if failed and not saved and not text:
-            await message.channel.send(t("attach_failed", failed=', '.join(failed)))
-            _processing[message.channel.id] = False
-            return
-        if saved:
-            paths = "\n".join(saved)
-            text = (text + "\n\n" if text else "") + t("uploaded_files", paths=paths)
+                failed.append(t("voice_fail", filename=att.filename, ex=ex))
+            finally:
+                dest.unlink(missing_ok=True)  # 語音輸入音檔只需轉錄一次，用完即刪，不堆積
+            continue
+        try:
+            await att.save(dest)   # discord.py 原生非同步下載，不阻塞 event loop
+            # 簡報轉 PDF 後給 CC 視覺讀取；轉檔失敗則回退原檔
+            if dest.suffix.lower() in (".ppt", ".pptx"):
+                pdf = await _convert_pptx(dest)
+                saved.append(str(pdf) if pdf else str(dest))
+            else:
+                saved.append(str(dest))
+        except Exception as ex:
+            failed.append(t("attach_fail_item", filename=att.filename, ex=ex))
+    # 語音辨識結果當成使用者打的字
+    if voice_texts:
+        is_voice = True
+        heard = " ".join(voice_texts)
+        await message.channel.send(t("heard", heard=heard))
+        # 顯示給使用者的是乾淨原文；送給 CC 的另外包一層提示，
+        # 標明這是語音辨識結果、可能有怪字，請 CC 依上下文推斷原意
+        text = (text + " " if text else "") + t("voice_hint", heard=heard)
+    # 未裝語音模組時收到語音 → 提示（文字附件仍照常處理）
+    if voice_blocked and not voice_texts:
+        await message.channel.send(t("drive_unavailable"))
+    if failed and not saved and not text:
+        await message.channel.send(t("attach_failed", failed=', '.join(failed)))
+        return "", False
+    if saved:
+        paths = "\n".join(saved)
+        text = (text + "\n\n" if text else "") + t("uploaded_files", paths=paths)
+    return text, is_voice
 
+
+# ── 工作中收到的訊息：排隊，等這回合結束一次讀完、一次處理 ──────────────────
+# 刻意不設則數上限：訊息被收下卻不處理，比排隊太長更傷。附件在入隊當下就轉成文字
+# （見 _collect_message_text），所以這裡存的一律是純文字。
+_queued: dict[int, list[str]] = {}                  # 頻道 → 累積的訊息（含 [說話者]: 前綴）
+_queued_voice: set[int] = set()                     # 該批次含語音輸入 → 消化時要語音回覆
+_queue_note: dict[int, discord.Message] = {}        # 排隊提示訊息，就地改數字，不洗版
+_queued_author: dict[int, discord.abc.User] = {}    # 最後一位排隊發言者：接力回合的完成通知要 @ 他
+
+
+async def _enqueue_while_busy(message: discord.Message) -> None:
+    """CC 正在忙時收到的訊息：轉成文字存進佇列，並就地更新一則「已排隊 N 則」提示。"""
+    cid = message.channel.id
+    text, is_voice = await _collect_message_text(message)
     if not text:
-        _processing[message.channel.id] = False
         return
-
-    state.pending_options = None
-
-    # Speaker ID：告知 CC 是誰在說話
     speaker = message.author.display_name
-    full_prompt = f"[{speaker}]: {text}"
-    _append_user_ledger(message.channel.id, speaker, text)   # 原始訊息落地存檔，供日後查證用
+    _append_user_ledger(cid, speaker, text)   # 原始訊息落地存檔，供日後查證用
+    _queued.setdefault(cid, []).append(f"[{speaker}]: {text}")
+    _queued_author[cid] = message.author
+    if is_voice:
+        _queued_voice.add(cid)
+    n = len(_queued[cid])
+    note = _queue_note.get(cid)
+    shown = False
+    if note is not None:
+        try:
+            await note.edit(content=t("queued_note", n=n))
+            shown = True
+        except discord.HTTPException:
+            pass   # 提示訊息被刪或編輯失敗 → 底下重發一則
+    if not shown:
+        _queue_note[cid] = await message.channel.send(t("queued_note", n=n))
+    # 附件下載／語音轉錄要花好幾秒，這期間上一回合可能已經收工——它那時撈到的是空佇列，
+    # 這則還沒進來，於是沒有任何人會回頭拿它。這裡補一刀自己接手。
+    await _drain_queue(message.channel, get_state(cid))
 
-    # Auto-compact：context 達門檻先壓縮
-    await _maybe_auto_compact(message.channel, state)
 
-    # 目前 session 標題，顯示在過程訊息底部狀態列，工作時一眼知道在哪個對話
-    state._session_label = await asyncio.to_thread(_session_label, state.session_id)
+def _merge_queued(batch: list[str]) -> str:
+    """把排隊的數則訊息合併成一次 prompt。
 
-    progress_msg = await message.channel.send(t("thinking"))
+    必須明講「後面可能在修正前面」：少了這句，CC 會把它們當成幾件平行任務全做一遍，
+    而人在等待時補的話多半是更正（「等等，改成 X」）——照著先做完錯的那件才是真傷害。
+    """
+    return t("queued_merged", n=len(batch), body="\n".join(batch))
+
+
+async def _clear_queue(cid: int) -> None:
+    """丟棄該頻道待處理的佇列（使用者喊停、或回合出錯時）。
+
+    提示訊息一定要跟著更正：留著「已排隊 3 則」會讓使用者以為它們還排在後面等著跑，
+    實際上已經被丟掉了。
+    """
+    batch = _queued.pop(cid, [])
+    _queued_voice.discard(cid)
+    _queued_author.pop(cid, None)
+    note = _queue_note.pop(cid, None)
+    if batch and note is not None:
+        try:
+            await note.edit(content=t("queued_dropped", n=len(batch)))
+        except discord.HTTPException:
+            pass
+
+
+async def _take_batch(cid: int) -> tuple[list[str], bool, Optional[discord.abc.User]]:
+    """取出並清空佇列，回傳 (訊息列表, 是否含語音輸入, 最後一位發言者)。
+
+    先 pop 完才 await：兩者之間夾 await 會讓同一批有機會被取走兩次。
+    """
+    batch = _queued.pop(cid, [])
+    is_voice = cid in _queued_voice
+    author = _queued_author.pop(cid, None)
+    _queued_voice.discard(cid)
+    note = _queue_note.pop(cid, None)
+    if batch and note is not None:
+        try:
+            await note.edit(content=t("queued_start", n=len(batch)))
+        except discord.HTTPException:
+            pass
+    return batch, is_voice, author
+
+
+async def _consume_turns(channel, author, state: ChannelState, full_prompt: str, is_voice: bool) -> None:
+    """跑一輪，並把這期間排進來的訊息整批接力跑完，直到沒有新的為止。
+
+    呼叫端必須先佔住 _processing（本函式負責釋放）：消化期間它一直是 True，
+    所以又進來的訊息會繼續排隊、不會並行開跑。
+    """
+    try:
+        while True:
+            if not await _run_turn(channel, author, state, full_prompt, is_voice):
+                await _clear_queue(channel.id)   # 喊停或出錯 → 排隊的不再接著跑
+                break
+            batch, is_voice, batch_author = await _take_batch(channel.id)
+            if not batch:
+                break
+            # 上一輪若以提問收尾，pending_options 還留著那些選項；排隊訊息是直接送進 CC、
+            # 不走選項映射的，殘留下去會讓使用者之後打的數字被誤譯成舊選項
+            state.pending_options = None
+            author = batch_author or author   # 完成通知要 @ 真正在等的那個人
+            full_prompt = _merge_queued(batch)
+    finally:
+        _processing[channel.id] = False
+        state._live_msg = None   # 清掉過程訊息參照（成功時 run_claude 已清，這裡兜底錯誤路徑）
+
+
+async def _drain_queue(channel, state: ChannelState) -> None:
+    """替「不經 on_message 的回合」把佇列接手跑完。
+
+    會佔住 _processing 的路徑不只 on_message：按鈕作答與 /recall（_run_and_reply）也會，
+    而它們的 finally 放掉旗標之後沒有人消化佇列——訊息會一直停在「已排隊 N 則」，
+    直到使用者再講一次話才被帶走。排程那條沒有 message 物件可用，維持原樣。
+    """
+    if _processing.get(channel.id) or not _queued.get(channel.id):
+        return
+    _processing[channel.id] = True   # 先佔住再取；這兩行之間不能有 await
+    try:
+        batch, is_voice, author = await _take_batch(channel.id)
+    except Exception:
+        _processing[channel.id] = False   # 旗標卡住的話這個頻道會從此只排隊不執行
+        raise
+    if not batch:
+        _processing[channel.id] = False
+        return
+    await _consume_turns(channel, author, state, _merge_queued(batch), is_voice)
+
+
+async def _edit_or_send(channel, msg: Optional[discord.Message], content: str) -> None:
+    """有畫布就改它，沒有（或改不動）就另發一則——錯誤訊息不能因此消失。"""
+    if msg is not None:
+        try:
+            await msg.edit(content=content)
+            return
+        except discord.HTTPException:
+            pass
+    try:
+        await channel.send(content)
+    except discord.HTTPException:
+        pass
+
+
+async def _run_turn(channel, author, state: ChannelState, full_prompt: str, is_voice: bool) -> bool:
+    """跑完整一輪 CC（含空回應補刀、未完成續跑、送出回覆）。
+
+    回傳是否正常收工：使用者按停止或回合出錯時回 False，呼叫端據此放棄後續排隊批次
+    ——喊了停還把排隊的訊息接著跑完，等於停止鍵沒有用。
+    呼叫端負責 _processing 的取得與釋放（整批排隊訊息共用同一段忙碌期）。
+    """
+    # 這三步也要在 try 內：它們在畫布（progress_msg）建立之前，一旦丟例外就會穿過
+    # 呼叫端的接力迴圈，而那時整批排隊訊息已經被取走——會無聲蒸發，頻道上什麼都不剩。
+    progress_msg: Optional[discord.Message] = None
     t0 = time.time()
     try:
+        # Auto-compact：context 達門檻先壓縮
+        await _maybe_auto_compact(channel, state)
+
+        # 目前 session 標題，顯示在過程訊息底部狀態列，工作時一眼知道在哪個對話
+        state._session_label = await asyncio.to_thread(_session_label, state.session_id)
+
+        progress_msg = await channel.send(t("thinking"))
+        t0 = time.time()
         reply, new_sid, ask_data = await _run_tracked(
-            message.channel.id, full_prompt, state, progress_msg
+            channel.id, full_prompt, state, progress_msg
         )
         if new_sid:
             state.session_id = new_sid
             _persist_session(state)
             # 更新標題與 bot 狀態（新對話此時才有 session 檔可讀標題）
             state._session_label = await asyncio.to_thread(_session_label, new_sid)
-            await _update_presence(message.channel.id, state._session_label)
+            await _update_presence(channel.id, state._session_label)
         # 空回應自動補刀（#50597／#74260 家族：模型只產思考塊、一個字不寫就 end_turn）。
         # #50597 已被官方 closed as not planned → client 端兜底是唯一的路，別等上游修。
         # 三層防線：① 重試至多 MAX_EMPTY_RETRY 次（原本一次為限，紀錄裡有連續四次空回覆）
@@ -3406,7 +3524,7 @@ async def on_message(message: discord.Message) -> None:
         # 兜底素材自己保管：_last_turn_think 每回合被無條件覆寫，而關思考的重試拿不到
         # 思考文字，會把前面那份有內容的摘要洗成空字串——第三層因此永遠讀到空值、形同
         # 死碼。這裡逐輪留下最長的一份，作用域鎖在本回合，不會拿到別回合的思考亂貼。
-        _best_think = (_last_turn_think.get(message.channel.id) or "").strip()
+        _best_think = (_last_turn_think.get(channel.id) or "").strip()
         try:
             while reply == _NO_RESPONSE and not ask_data and _empty < MAX_EMPTY_RETRY:
                 _empty += 1
@@ -3415,13 +3533,13 @@ async def on_message(message: discord.Message) -> None:
                 state._no_think = _empty >= 2
                 # 重試提示另發一則獨立訊息：傳給 run_claude 當畫布的那則會在 1.5 秒內
                 # 被進度動畫整段覆寫、收尾時還可能被刪，計數就這樣沒了。
-                await message.channel.send(t(
+                await channel.send(t(
                     "empty_retry_note_nothink" if state._no_think else "empty_retry_note",
                     n=_empty, max=MAX_EMPTY_RETRY))
-                retry_msg = await message.channel.send(t("thinking"))
+                retry_msg = await channel.send(t("thinking"))
                 reply, sid2, ask_data = await _run_tracked(
-                    message.channel.id, t("empty_retry_nudge"), state, retry_msg)
-                _t = (_last_turn_think.get(message.channel.id) or "").strip()
+                    channel.id, t("empty_retry_nudge"), state, retry_msg)
+                _t = (_last_turn_think.get(channel.id) or "").strip()
                 if len(_t) > len(_best_think):
                     _best_think = _t
                 if sid2:
@@ -3445,9 +3563,9 @@ async def on_message(message: discord.Message) -> None:
                and not _last_turn_wait.get(state._cid)
                and not _last_turn_done.get(state._cid)):
             _cont += 1
-            cont_msg = await message.channel.send(t("thinking"))
+            cont_msg = await channel.send(t("thinking"))
             more, sid3, ask_data = await _run_tracked(
-                message.channel.id, t("continue_nudge"), state, cont_msg)
+                channel.id, t("continue_nudge"), state, cont_msg)
             if sid3:
                 state.session_id = sid3
                 _persist_session(state)
@@ -3458,38 +3576,114 @@ async def on_message(message: discord.Message) -> None:
             # 先送出「問題前的說明文字（思考結果）」，再送問題按鈕；
             # 否則使用者只會看到問題按鈕、看不到上方的說明文字
             if reply and reply != _NO_RESPONSE:
-                reply = await _voice_reply(message.channel, reply, speak=(is_voice and _drive_mode))
-                await _send_files_and_text(message.channel, reply)
-            await _send_ask_question(message.channel, ask_data, state)
+                reply = await _voice_reply(channel, reply, speak=(is_voice and _drive_mode))
+                await _send_files_and_text(channel, reply)
+            await _send_ask_question(channel, ask_data, state)
         elif reply and reply != _NO_RESPONSE:
             # 開車模式＋這則是語音輸入 → 解析朗讀版、合成語音檔；回傳去掉標記的文字版
-            reply = await _voice_reply(message.channel, reply, speak=(is_voice and _drive_mode))
-            await _send_files_and_text(message.channel, reply)
+            reply = await _voice_reply(channel, reply, speak=(is_voice and _drive_mode))
+            await _send_files_and_text(channel, reply)
         # 長任務完成 → @使用者推播（手機會震，可離開後再回來）
         elapsed = time.time() - t0
-        if elapsed >= NOTIFY_AFTER_SEC:
+        if elapsed >= NOTIFY_AFTER_SEC and author is not None:
             tip = t("notify_need_answer") if ask_data else t("notify_done")
-            await message.channel.send(f"{message.author.mention} ✅ {tip} · {elapsed:.0f}s")
+            await channel.send(f"{author.mention} ✅ {tip} · {elapsed:.0f}s")
         # 側欄頻道：第一句處理完 → 讀內容生成中文標題、改頻道名（只改一次）
         if state._sidebar and not state._named and state.session_id:
             state._named = True
-            asyncio.create_task(_autoname_channel(message.channel, state))
+            asyncio.create_task(_autoname_channel(channel, state))
         # 側欄頻道：最新有活動 → 移到入口下方置頂（已在頂端不動）
         elif state._sidebar:
-            asyncio.create_task(_bump_channel_to_top(message.channel))
+            asyncio.create_task(_bump_channel_to_top(channel))
+        # CC 正在等使用者回話（按鈕或純文字提問）→ 排隊的訊息就是答案，照樣接著送進去
+        return True
     except _StoppedByUser:
-        await (state._live_msg or progress_msg).edit(content=t("stopped"))
+        await _edit_or_send(channel, state._live_msg or progress_msg, t("stopped"))
     except CCError as e:
-        await _handle_cc_error(state._live_msg or progress_msg, e, state)
-        if time.time() - t0 >= NOTIFY_AFTER_SEC:
-            await message.channel.send(t("notify_error", mention=message.author.mention))
+        # 畫布可能還沒建起來（出錯在那之前）→ 補一則給錯誤處理當落點
+        canvas = state._live_msg or progress_msg or await channel.send(t("thinking"))
+        await _handle_cc_error(canvas, e, state)
+        if time.time() - t0 >= NOTIFY_AFTER_SEC and author is not None:
+            await channel.send(t("notify_error", mention=author.mention))
     except Exception as e:
         print(f"[CC_FAIL] kind=UNCLASSIFIED raw={e!r}", flush=True)
         detail = f"{type(e).__name__}: {e}"[:1500]
-        await (state._live_msg or progress_msg).edit(content=t("unexpected_error", detail=detail)[:2000])
-    finally:
+        await _edit_or_send(channel, state._live_msg or progress_msg,
+                            t("unexpected_error", detail=detail)[:2000])
+    return False
+
+
+# ── 一般訊息 → 送給 Claude ──────────────────────────────────────────────
+@bot.event
+async def on_message(message: discord.Message) -> None:
+    if message.author.bot:
+        return
+    # 『原地開新對話』：授權使用者在當前入口頻道打字（非指令）→ 把這個入口就地轉成
+    # 對話頻道、另補一個新空白入口到最上面，再用同一頻道照常處理這句話。
+    if (message.channel.id == _sidebar_entry_id
+            and message.author.id in _allowed_users
+            and not message.content.startswith("/")):
+        if not await _promote_entry_channel(message.channel):
+            # 並發重入／缺分類／缺權限：放掉這則、不做半套處理。但要明講——靜默 return
+            # 會讓使用者只看到訊息送出後毫無反應，無從判斷該不該重打（分類撞滿 50 個
+            # 頻道時就這樣吞掉過訊息；該硬上限現已由 _prune_old_convos 擋在前面）。
+            await message.channel.send(t("entry_promote_failed"), delete_after=15)
+            return
+        # 轉正成功：此頻道現已在 _allowed_channels，往下照常跑對話流程
+    if message.channel.id not in _allowed_channels or message.author.id not in _allowed_users:
+        return
+    if message.content.startswith("/"):   # slash 指令走 interaction 事件，不進 CC
+        return
+
+    if _processing.get(message.channel.id):
+        # 工作中收到的訊息不丟掉：排進佇列，這回合結束後整批一次讀完、一次處理
+        await _enqueue_while_busy(message)
+        return
+
+    state = get_state(message.channel.id)
+    text = re.sub(r"<@!?\d+>", "", message.content).strip()
+
+    # 若有待答選項，使用者打數字 → 對應到選項文字
+    pending = state.pending_options
+    if pending and text.isdigit():
+        idx = int(text) - 1
+        if 0 <= idx < len(pending):
+            chosen = pending[idx]
+            state.pending_options = None
+            await _process_answer(message.channel, chosen, state)
+            return
+
+    # 佔住 _processing 再處理附件：下載／轉檔期間進來的訊息才會排隊而非並行開跑。
+    # 從這裡到 _consume_turns 之間全程包在 try 裡：中間每個 await 都可能丟例外
+    # （Discord 403/429、頻道被刪、磁碟寫不進去），漏放旗標的話這個頻道就會永遠
+    # 停在「已排隊 N 則」——每則都被安撫、每則都不會跑，比直接壞掉更難察覺。
+    _processing[message.channel.id] = True
+    try:
+        text, is_voice = await _collect_message_text(message)
+        if not text:
+            _processing[message.channel.id] = False
+            return
+
+        state.pending_options = None
+
+        # Speaker ID：告知 CC 是誰在說話
+        speaker = message.author.display_name
+        _append_user_ledger(message.channel.id, speaker, text)   # 原始訊息落地存檔，供查證用
+        # 佇列可能還躺著沒人消化的訊息（排程執行期間排下的——那條路徑不會回頭處理），
+        # 連同這則一起帶走，別讓它們一直卡在那裡
+        stale, stale_voice, _ = await _take_batch(message.channel.id)
+        if stale:
+            is_voice = is_voice or stale_voice
+            full_prompt = _merge_queued(stale + [f"[{speaker}]: {text}"])
+        else:
+            full_prompt = f"[{speaker}]: {text}"
+    except Exception:
         _processing[message.channel.id] = False
-        state._live_msg = None   # 清掉過程訊息參照（成功時 run_claude 已清，這裡兜底錯誤路徑）
+        raise   # 旗標放掉，例外照樣往上拋讓 discord.py 印出來，別靜靜吞掉
+
+    # 跑一輪；收工時若有排隊訊息，整批合併成一次 prompt 再跑，直到沒有新的為止
+    await _consume_turns(message.channel, message.author, state, full_prompt, is_voice)
+
 
 def _acquire_single_instance_lock() -> Optional["socket.socket"]:
     """單一實例防呆：綁定固定本機 port，綁不上代表已有 bot 在跑，回傳 None。

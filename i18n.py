@@ -522,7 +522,18 @@ _STRINGS: dict[str, dict[str, str]] = {
             "\n"
             "**Transparency works for you**: the 📥 command echo guards against \"it's running something else\"; destructive commands are never folded — each gets its own ⚠️ line in full for you to verify; other file edits and commands show up in the gray per-step summaries. Anything looks off — `/stop` any time."
         ),
-        "busy_prev": "⏳ Still handling the previous message, please try again shortly.",
+        # 忙碌中收到的訊息 → 排隊。提示訊息就地改數字，不逐則洗版
+        "queued_note": "📥 Got it — still working. {n} message(s) queued; I'll read them all at once when this turn ends.",
+        "queued_start": "📥 Now handling the {n} queued message(s).",
+        "queued_dropped": "🚫 The {n} queued message(s) were dropped (the turn was stopped or failed) — please send them again.",
+        # 送進 CC 的合併 prompt。「後面可能在修正前面」這句不能省：少了它，CC 會把整批
+        # 當成幾件各自獨立的任務全做一遍，而人在等待時補的話多半是更正
+        "queued_merged": (
+            "Below are {n} messages the user sent while you were working. Read all of them "
+            "before acting. They are in order, and a later message may be correcting or "
+            "refining an earlier one — follow the final intent rather than treating them as "
+            "separate independent tasks to complete one by one.\n\n{body}"
+        ),
         # 入口頻道轉正失敗時的提示。不能靜默丟棄訊息，否則使用者只看到毫無反應
         "entry_promote_failed": "⚠️ Couldn't start a new conversation here — your message wasn't processed. Please send it again (if it keeps failing, check the bot log).",
         "heard": "🎤 Heard: {heard}",
@@ -1036,7 +1047,17 @@ _STRINGS: dict[str, dict[str, str]] = {
             "\n"
             "**透明化在幫你**：📥 指令核對防「它在跑別的東西」；破壞性指令絕不摺疊，一律以 ⚠️ 單獨完整列出讓你核對；其餘改檔與指令都收在每一步的小灰字統計裡。看到不對勁隨時 `/stop`。"
         ),
-        "busy_prev": "⏳ 還在處理上一則訊息，請稍後再試。",
+        # 忙碌中收到的訊息 → 排隊。提示訊息就地改數字，不逐則洗版
+        "queued_note": "📥 收到了，還在忙——已排隊 {n} 則，這回合結束後一次讀完、一起處理。",
+        "queued_start": "📥 開始處理排隊中的 {n} 則訊息。",
+        "queued_dropped": "🚫 排隊中的 {n} 則訊息已取消（這回合被停止或出錯），請重新傳一次。",
+        # 送進 CC 的合併 prompt。「後面可能在修正前面」這句不能省：少了它，CC 會把整批
+        # 當成幾件各自獨立的任務全做一遍，而人在等待時補的話多半是更正
+        "queued_merged": (
+            "以下是你剛才工作期間陸續傳來的 {n} 則訊息，請一次全部讀完再動手。\n"
+            "它們有先後順序，後面的訊息可能是在修正或補充前面的，請以最終意圖為準，"
+            "不要當成幾件各自獨立的任務分開做完。\n\n{body}"
+        ),
         # 入口頻道轉正失敗時的提示。不能靜默丟棄訊息，否則使用者只看到毫無反應
         "entry_promote_failed": "⚠️ 這裡沒能開成新對話，你剛才那則訊息沒有被處理，請重新發一次（若一直失敗請看 bot log）。",
         "heard": "🎤 聽到：{heard}",
