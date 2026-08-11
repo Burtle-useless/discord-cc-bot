@@ -462,6 +462,10 @@ MAX_AUTO_CONTINUE = 2
 # 這是最傷的故障：bot 端發生率 6.1%、是 CLI 的 3 倍，且使用者催促率 15.9% 最高。
 # 原本「一次為限」，重試再失敗就放棄，紀錄裡有連續四次空回覆的鬼打牆。
 MAX_EMPTY_RETRY = 3
+# 一個回合裡最多跳過幾個「不屬於本 prompt」的 ResultMessage（CLI 為系統事件另起的輪次，
+# 例如 resume 舊 session 時投遞的孤兒背景任務通知）。設上限是避免串流出狀況時無限等下去，
+# 屆時寧可退回舊行為（當成本回合的結果）交給既有的空回應重試接手。
+MAX_ALIEN_TURNS = 3
 
 
 async def _run_tracked(
@@ -1216,6 +1220,8 @@ async def run_claude(
     start = time.time()
     pending_bg: dict[str, str] = {}   # 進行中的背景任務 {task_id: 描述}，狀態列顯示用
     bg_left: list[bool] = [False]     # 收工時仍有背景任務未完成 → 收尾要丟棄 client
+    saw_assistant: list[bool] = [False]  # 本回合是否收到過 AssistantMessage（見 ResultMessage 處）
+    alien_turns: list[int] = [0]         # 已跳過幾個「不屬於本 prompt」的回合
     pending_question: dict = {}
     live_text: str = ""  # 生成中累積的回應文字（底部狀態列即時顯示尾段）
     live_think: str = ""  # 本步累積的思考摘要（狀態列顯示尾段，讓使用者看得到模型在想什麼）
@@ -1385,6 +1391,21 @@ async def run_claude(
                     pending_bg.pop(message.task_id, None)
                 if isinstance(message, ResultMessage):
                     _client_used[state._cid] = time.time()  # 標記活躍；client 留池不關
+                    # CLI 會為系統事件另起自己的回合，而那一輪的 ResultMessage 會排在我們
+                    # 這個 prompt 的前面先到。實例：resume 一個舊 session 時，CLI 會投遞
+                    # 「上個 session 有背景任務沒有完成紀錄」的孤兒掃描通知（origin.kind=
+                    # task-notification），它有自己的 promptId、自成一輪。照單全收就會把
+                    # 那一輪的空結果當成使用者這則訊息的回覆 → 誤判成「模型沒輸出文字」而
+                    # 觸發空回應重試，使用者的訊息其實正在被處理，回覆卻沒有人接（吃訊息）。
+                    # SDK 無從分辨（ResultMessage 不帶 promptId，receive_response 的定義就是
+                    # 見到 ResultMessage 即終止），只能在這裡判。
+                    # 判準：我們送出的 prompt 一定會產生 AssistantMessage——就算是模型只思考
+                    # 不吐字的 #50597 空回應，也有一則只含 thinking block 的 AssistantMessage。
+                    # 零 AssistantMessage 的回合必然不是我們的，跳過它繼續等。
+                    if not saw_assistant[0] and alien_turns[0] < MAX_ALIEN_TURNS:
+                        alien_turns[0] += 1
+                        messages.clear()   # 別人回合的訊息不能折進我們的回覆
+                        continue
                     # 照 SDK 原生語意收工：receive_response() 的定義就是「收到 ResultMessage
                     # 即結束本回合」，背景工作完成時 CLI 會另起一輪叫醒 CC，那不屬於這一回合。
                     # 反其道留在迴圈裡等 pending_bg 清空的話，遇到「啟動常駐服務」這類永遠
@@ -1394,6 +1415,7 @@ async def run_claude(
                         bg_left[0] = True
                     break
                 if isinstance(message, AssistantMessage):
+                    saw_assistant[0] = True
                     _commit_step(message)   # 這一步定稿成軌跡的一段（往下累積、不覆蓋前面）
         except Exception:
             # 長駐 client 可能已損壞（連線斷／進程死）→ 丟棄，下次重建並 resume 接回
