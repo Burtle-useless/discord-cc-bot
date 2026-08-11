@@ -120,7 +120,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "compact_failed": "⚠️ Auto-compact failed ({e}), continuing with the original reply...",
         # 檔案
         "file_not_found": "⚠️ File not found: `{fp}`",
-        "file_too_large": "⚠️ File too large to upload (>25MB): `{name}`\nPath: `{fp}`",
+        "file_too_large": "⚠️ File exceeds this server's upload limit: `{name}`\nPath: `{fp}`",
         "file_upload_failed": "⚠️ Upload failed `{name}`: {e}",
         "reply_long_preview": "\n\n…(long content — full version attached 📄)",
         # 錯誤處理
@@ -487,7 +487,7 @@ _STRINGS: dict[str, dict[str, str]] = {
             "📖 **Files**\n"
             "\n"
             "**Sending**: drag files into the channel and Claude can read them. Images are understood visually; PowerPoint files are auto-converted to PDF for page-by-page reading.\n"
-            "**Receiving**: ask it to \"send me the X file\" and it uploads straight to the channel (25MB limit).\n"
+            "**Receiving**: ask it to \"send me the X file\" and it uploads straight to the channel (subject to the server's upload limit).\n"
             "**Screen**: `/screenshot` captures the PC's current screen — handy for checking progress while away.\n"
             "**Directories**: `/cd path` changes the working directory, `/pwd` shows it. Per-channel, remembered across restarts."
         ),
@@ -659,7 +659,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "compacted": "🗜️ 上下文已自動壓縮，繼續處理中...",
         "compact_failed": "⚠️ 自動壓縮失敗（{e}），繼續原始回覆...",
         "file_not_found": "⚠️ 找不到檔案：`{fp}`",
-        "file_too_large": "⚠️ 檔案太大無法上傳（>25MB）：`{name}`\n路徑：`{fp}`",
+        "file_too_large": "⚠️ 檔案超過本伺服器的上傳上限：`{name}`\n路徑：`{fp}`",
         "file_upload_failed": "⚠️ 上傳失敗 `{name}`：{e}",
         "reply_long_preview": "\n\n…（內容較長，完整版見附件 📄）",
         "session_auto_cleared": "\n（已自動清除 session，下一則訊息會開新對話）",
@@ -1012,7 +1012,7 @@ _STRINGS: dict[str, dict[str, str]] = {
             "📖 **檔案**\n"
             "\n"
             "**給檔案**：直接把檔案拖進頻道，Claude 就能讀。圖片看得懂內容；PowerPoint 會自動轉成 PDF 讓它逐頁讀。\n"
-            "**拿檔案**：跟它說「把 XX 檔傳給我」，它會直接上傳到頻道（上限 25MB）。\n"
+            "**拿檔案**：跟它說「把 XX 檔傳給我」，它會直接上傳到頻道（受伺服器上傳上限限制）。\n"
             "**看螢幕**：`/screenshot` 截取電腦目前畫面傳上來，出門在外看進度很方便。\n"
             "**切目錄**：`/cd 路徑` 換工作目錄、`/pwd` 看現在在哪。每個頻道記各自的目錄。"
         ),

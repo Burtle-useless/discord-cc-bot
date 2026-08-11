@@ -529,6 +529,27 @@ def test_queue_while_busy() -> None:
     ok("忙碌排隊：不丟訊息、提示就地更新、合併保序、取消有交代")
 
 
+def test_upload_limit() -> None:
+    """上傳門檻要跟著伺服器加成等級走。寫死 25MB 會讓 10.25MB 的檔案
+    誤判成「傳得過去」，實際被 Discord 回 413。"""
+    class _G:
+        def __init__(self, limit: int) -> None:
+            self.filesize_limit = limit
+
+    class _Ch:
+        def __init__(self, guild) -> None:
+            self.guild = guild
+
+    ten = 10 * 1024 * 1024
+    apk = int(10.25 * 1024 * 1024)
+    assert d._upload_limit(_Ch(_G(ten))) == ten
+    assert apk > d._upload_limit(_Ch(_G(ten))), "10.25MB 在未加成伺服器必須判定為過大"
+    assert d._upload_limit(_Ch(_G(50 * 1024 * 1024))) == 50 * 1024 * 1024   # 加成後放寬
+    assert d._upload_limit(_Ch(None)) == ten            # 私訊沒有 guild
+    assert d._upload_limit(_Ch(_G(0))) == ten           # 取不到就退回免費下限
+    ok("_upload_limit 跟隨伺服器加成等級（10.25MB 檔案不再誤判可傳）")
+
+
 def main() -> None:
     test_classify_cc_error()
     test_context_limit_for()
@@ -551,6 +572,7 @@ def main() -> None:
     test_append_trace_line()
     test_atomic_write_text()
     test_queue_while_busy()
+    test_upload_limit()
     print(f"✅ 全部通過（{passed} 項）")
 
 

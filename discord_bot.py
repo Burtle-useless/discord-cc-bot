@@ -1510,7 +1510,13 @@ async def run_claude(
 
 # ── [[FILE:路徑]] 標記並上傳檔案 ─────────────────────────────────────────
 _FILE_MARKER = re.compile(r"\[\[FILE:\s*(.+?)\s*\]\]")
-_DISCORD_FILE_LIMIT = 25 * 1024 * 1024
+_DEFAULT_UPLOAD_LIMIT = 10 * 1024 * 1024   # Discord 未加成伺服器與私訊的上限
+
+
+def _upload_limit(channel) -> int:
+    """該頻道實際能上傳的位元組上限。伺服器加成等級會抬高（10/50/100 MiB），
+    私訊或取不到伺服器資訊時退回免費下限——寫死 25MB 會讓 10MB 檔案吃 413。"""
+    return getattr(getattr(channel, "guild", None), "filesize_limit", 0) or _DEFAULT_UPLOAD_LIMIT
 
 # ── 螢幕截圖（手機遠端看電腦畫面）──────────────────────────────────────
 def _capture_screenshot_sync() -> Optional[Path]:
@@ -1631,12 +1637,13 @@ async def _send_files_and_text(channel, text: str) -> None:
     if clean:
         await send_long(channel, clean)
 
+    limit = _upload_limit(channel)
     for p in paths:
         fp = Path(p.strip().strip('"').strip("'"))
         if not fp.exists() or not fp.is_file():
             await channel.send(t("file_not_found", fp=fp))
             continue
-        if fp.stat().st_size > _DISCORD_FILE_LIMIT:
+        if fp.stat().st_size > limit:
             await channel.send(t("file_too_large", name=fp.name, fp=fp))
             continue
         try:
@@ -3108,7 +3115,7 @@ async def cmd_screenshot(interaction: discord.Interaction) -> None:
         await interaction.followup.send(t("screenshot_failed"))
         return
     try:
-        if shot.stat().st_size > _DISCORD_FILE_LIMIT:
+        if shot.stat().st_size > _upload_limit(interaction.channel):
             await interaction.followup.send(t("screenshot_too_large"))
         else:
             await interaction.followup.send(t("screenshot_caption"), file=discord.File(str(shot)))
