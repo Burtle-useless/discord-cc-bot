@@ -1212,6 +1212,7 @@ async def run_claude(
     prompt: str,
     state: ChannelState,
     progress_msg: Optional[discord.Message] = None,
+    expect_assistant: bool = True,
 ) -> tuple[str, Optional[str], Optional[dict]]:
     """回傳 (content, new_session_id, ask_question_data)"""
     trace: str = ""      # 已定稿的過程軌跡：一步步往下累積、不覆蓋（顯示在同一則訊息內）
@@ -1402,7 +1403,10 @@ async def run_claude(
                     # 判準：我們送出的 prompt 一定會產生 AssistantMessage——就算是模型只思考
                     # 不吐字的 #50597 空回應，也有一則只含 thinking block 的 AssistantMessage。
                     # 零 AssistantMessage 的回合必然不是我們的，跳過它繼續等。
-                    if not saw_assistant[0] and alien_turns[0] < MAX_ALIEN_TURNS:
+                    # 例外：CLI 內建 slash command（/compact）整輪都由 CLI 自己處理，實測只有
+                    # SystemMessage／UserMessage／ResultMessage，模型不發言＝零 AssistantMessage。
+                    # 對這種 prompt 套用下面的判準會把它當成別人的回合而一直等，直到閒置逾時。
+                    if expect_assistant and not saw_assistant[0] and alien_turns[0] < MAX_ALIEN_TURNS:
                         alien_turns[0] += 1
                         messages.clear()   # 別人回合的訊息不能折進我們的回覆
                         continue
@@ -1598,6 +1602,7 @@ async def _maybe_auto_compact(channel: discord.TextChannel, state: ChannelState)
         _, compact_sid, _ = await run_claude(
             t("compact_prompt"),
             state,
+            expect_assistant=False,   # /compact 由 CLI 處理，整輪不會有 AssistantMessage
         )
         if compact_sid:
             state.session_id = compact_sid
@@ -1607,7 +1612,11 @@ async def _maybe_auto_compact(channel: discord.TextChannel, state: ChannelState)
         await asyncio.sleep(1.5)
         await msg.delete()
     except Exception as e:
-        await msg.edit(content=t("compact_failed", e=e))
+        # 逾時類例外的 str() 是空的，直接帶進去只會顯示「失敗（）」什麼都查不到
+        detail = str(e).strip() or (type(e).__name__ + t("no_message"))
+        print(f"[COMPACT_FAIL] type={type(e).__name__} raw={str(e)!r}\n"
+              f"{traceback.format_exc()}", flush=True)
+        await msg.edit(content=t("compact_failed", e=detail))
 
 async def _emit_coord(channel, text: str) -> str:
     """解析回覆中的 [[COORD:]] 廣播：更新登錄表、發到協作頻道，回傳去標記後的文字。"""

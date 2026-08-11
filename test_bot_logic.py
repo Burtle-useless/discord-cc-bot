@@ -550,6 +550,69 @@ def test_upload_limit() -> None:
     ok("_upload_limit 跟隨伺服器加成等級（10.25MB 檔案不再誤判可傳）")
 
 
+def test_auto_compact_expects_no_assistant() -> None:
+    """自動壓縮必須關掉「這一輪要有 AssistantMessage」的判準。
+
+    /compact 由 CLI 自己處理，實測整輪只有 SystemMessage／UserMessage／
+    ResultMessage，模型完全不發言。孤兒回合判準（零 AssistantMessage ＝
+    別人的回合，跳過繼續等）會把壓縮誤判成別人的回合，一路等到閒置逾時——
+    使用者看到的是「自動壓縮失敗（）」，括號空的是因為逾時例外的 str()
+    本來就是空字串。
+    """
+    import asyncio
+
+    class _FakeSent:
+        def __init__(self) -> None:
+            self.content = ""
+            self.deleted = False
+
+        async def edit(self, content: str | None = None) -> None:
+            self.content = content or ""
+
+        async def delete(self) -> None:
+            self.deleted = True
+
+    class _FakeChannel:
+        def __init__(self) -> None:
+            self.sent: list[_FakeSent] = []
+
+        async def send(self, content: str | None = None, **kw: object) -> _FakeSent:
+            m = _FakeSent()
+            m.content = content or ""
+            self.sent.append(m)
+            return m
+
+    st = d.ChannelState(_cid=987_654_320, cwd=d.DEFAULT_DIR)
+    st.ctx_tokens = 10 ** 9        # 遠超門檻，確保真的會觸發壓縮
+    seen: dict = {}
+    orig = d.run_claude
+
+    async def _fake_run_claude(prompt, state, progress_msg=None, expect_assistant=True):
+        seen["expect_assistant"] = expect_assistant
+        return ("", None, None)
+
+    d.run_claude = _fake_run_claude
+    try:
+        ch = _FakeChannel()
+        asyncio.run(d._maybe_auto_compact(ch, st))
+        assert seen.get("expect_assistant") is False, \
+            "壓縮必須傳 expect_assistant=False，否則會卡到閒置逾時"
+        assert st.ctx_tokens == 0, "壓縮成功後 ctx 計數要歸零"
+
+        # 逾時例外的 str() 是空的：訊息必須退回型別名，不能只顯示「失敗（）」
+        async def _boom(prompt, state, progress_msg=None, expect_assistant=True):
+            raise asyncio.TimeoutError()
+
+        d.run_claude = _boom
+        ch2 = _FakeChannel()
+        st.ctx_tokens = 10 ** 9
+        asyncio.run(d._maybe_auto_compact(ch2, st))
+        assert "TimeoutError" in ch2.sent[0].content, ch2.sent[0].content
+    finally:
+        d.run_claude = orig
+    ok("自動壓縮：關閉 AssistantMessage 判準 + 空例外顯示型別名")
+
+
 def main() -> None:
     test_classify_cc_error()
     test_context_limit_for()
@@ -573,6 +636,7 @@ def main() -> None:
     test_atomic_write_text()
     test_queue_while_busy()
     test_upload_limit()
+    test_auto_compact_expects_no_assistant()
     print(f"✅ 全部通過（{passed} 項）")
 
 
