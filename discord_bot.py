@@ -1522,6 +1522,48 @@ def _upload_limit(channel) -> int:
     私訊或取不到伺服器資訊時退回免費下限——寫死 25MB 會讓 10MB 檔案吃 413。"""
     return getattr(getattr(channel, "guild", None), "filesize_limit", 0) or _DEFAULT_UPLOAD_LIMIT
 
+# ── 超過上限的檔案改走臨時下載連結（選填功能）─────────────────────────────
+# SHARE_SCRIPT 選填：指向一支 PowerShell 腳本，介面必須是
+#   <script> <檔案路徑> -As <輸出檔名> -Hours <時數>
+# 並把下載網址印到 stdout（例如用 cloudflared 之類的工具開臨時通道）。
+# 沒設定就完全維持原行為：檔案太大時只回報名稱與本機路徑。
+_SHARE_SCRIPT = (os.environ.get("SHARE_SCRIPT") or "").strip()
+_SHARE_HOURS = int(os.environ.get("SHARE_HOURS") or 24)
+_SHARE_URL_RE = re.compile(rb"https://\S+")
+
+
+def _ascii_name(fp: Path) -> str:
+    """把檔名壓成純 ASCII：非 ASCII 檔名會讓網址變成一長串 %E4%B8%AD 編碼，
+    在通訊軟體裡容易被截斷。"""
+    # 去掉非 ASCII 後只剩底線之類的分隔符時（全中文檔名就是這樣），視同空白
+    stem = re.sub(r"[^A-Za-z0-9._-]", "", fp.stem).strip("._-")
+    return (stem or "download") + fp.suffix
+
+
+def _share_file_sync(fp: Path) -> str:
+    """呼叫分享腳本建立臨時下載連結並回傳網址，失敗則拋出例外。"""
+    import subprocess
+    script = Path(_SHARE_SCRIPT)
+    if not script.exists():
+        raise FileNotFoundError(f"找不到 {script}")
+    proc = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+         "-File", str(script), str(fp),
+         "-As", _ascii_name(fp), "-Hours", str(_SHARE_HOURS)],
+        capture_output=True, timeout=120,
+    )
+    # 刻意不解碼全文：PowerShell 的非英文輸出在管道裡是系統編碼（中文 Windows 為
+    # CP950），解錯會誤判成失敗；網址是純 ASCII，直接在 bytes 上比對最穩。
+    m = _SHARE_URL_RE.search(proc.stdout)
+    if not m:
+        raise RuntimeError("分享腳本沒有輸出連結")
+    return m.group(0).decode("ascii")
+
+
+async def _share_file(fp: Path) -> str:
+    """非同步版；建通道最久約 40 秒，留兩倍餘裕。"""
+    return await asyncio.wait_for(asyncio.to_thread(_share_file_sync, fp), timeout=150)
+
 # ── 螢幕截圖（手機遠端看電腦畫面）──────────────────────────────────────
 def _capture_screenshot_sync() -> Optional[Path]:
     """截取整個虛擬螢幕（含多螢幕）成 PNG，回傳路徑；失敗回 None。"""
@@ -1637,6 +1679,25 @@ async def _emit_coord(channel, text: str) -> str:
                     pass
     return clean
 
+async def _share_big_file(channel, fp: Path, shared: bool) -> bool:
+    """把塞不進 Discord 的檔案改成臨時下載連結；回傳「這一批是否已佔用分享通道」。
+    未設定 SHARE_SCRIPT 時退回原本的「檔案太大」訊息。"""
+    # shared：分享腳本通常同時只維持一個通道，再開會把上一個連結蓋掉
+    if shared or not _SHARE_SCRIPT:
+        await channel.send(t("file_too_large", name=fp.name, fp=fp))
+        return shared
+    size = f"{fp.stat().st_size / 1024 / 1024:.1f} MB"
+    note = await channel.send(t("file_sharing", name=fp.name, size=size))
+    try:
+        url = await _share_file(fp)
+    except Exception as e:
+        await note.edit(content=t("file_share_failed", name=fp.name, fp=fp, e=e))
+        return shared
+    await note.edit(content=t("file_shared", name=fp.name, size=size,
+                              url=url, hours=_SHARE_HOURS))
+    return True
+
+
 async def _send_files_and_text(channel, text: str) -> None:
     if COORD_ENABLED:
         text = await _emit_coord(channel, text)
@@ -1647,18 +1708,25 @@ async def _send_files_and_text(channel, text: str) -> None:
         await send_long(channel, clean)
 
     limit = _upload_limit(channel)
+    shared = False
     for p in paths:
         fp = Path(p.strip().strip('"').strip("'"))
         if not fp.exists() or not fp.is_file():
             await channel.send(t("file_not_found", fp=fp))
             continue
-        if fp.stat().st_size > limit:
-            await channel.send(t("file_too_large", name=fp.name, fp=fp))
-            continue
-        try:
-            await channel.send(file=discord.File(str(fp)))
-        except Exception as e:
-            await channel.send(t("file_upload_failed", name=fp.name, e=e))
+        if fp.stat().st_size <= limit:
+            try:
+                await channel.send(file=discord.File(str(fp)))
+                continue
+            except discord.HTTPException as e:
+                # 413：實際上限比我們算的更低，退而走下載連結；其餘錯誤照常回報
+                if e.status != 413:
+                    await channel.send(t("file_upload_failed", name=fp.name, e=e))
+                    continue
+            except Exception as e:
+                await channel.send(t("file_upload_failed", name=fp.name, e=e))
+                continue
+        shared = await _share_big_file(channel, fp, shared)
 
 # ── 開車模式語音回覆：把 CC 附的朗讀版抽出來合成語音檔（核心在 drive_core）─────
 async def _voice_reply(channel, reply: str, speak: bool) -> str:

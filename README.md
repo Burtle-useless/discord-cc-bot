@@ -255,6 +255,25 @@ Some features need extra packages (already listed in `requirements.txt`):
 
 If you don't want a feature, you can skip its dependency.
 
+### Files bigger than Discord's upload limit (`SHARE_SCRIPT`)
+
+By default, a file too large to upload is reported by name and local path — no
+use to you if you're away from the machine. Set `SHARE_SCRIPT` in `.env` to a
+PowerShell script and the bot will instead hand back a temporary download link:
+
+```
+SHARE_SCRIPT=C:\path\to\share.ps1
+SHARE_HOURS=24
+```
+
+The script is invoked as `<script> <file> -As <name> -Hours <n>` and must print
+the download URL to stdout (anything that opens a temporary tunnel works —
+`cloudflared`, `ngrok`, an upload CLI…). The bot picks the first `https://…` in
+the output. Only the first oversized file per message is shared, since such
+tunnels usually serve one file at a time. Non-ASCII filenames are transliterated
+away first — they'd otherwise turn the URL into a long percent-encoded string
+that chat clients like to truncate.
+
 **Removing voice entirely.** All the voice code — Whisper speech-to-text, F5-TTS
 text-to-speech, and the GPU helpers — lives in one standalone, optional module:
 `drive_core.py`. The main bot imports it optionally, so if you never want voice

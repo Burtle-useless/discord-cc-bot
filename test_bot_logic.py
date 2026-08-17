@@ -550,6 +550,48 @@ def test_upload_limit() -> None:
     ok("_upload_limit 跟隨伺服器加成等級（10.25MB 檔案不再誤判可傳）")
 
 
+def test_ascii_name() -> None:
+    """分享連結的檔名要壓成 ASCII：非 ASCII 檔名會變成一長串百分號編碼，
+    在通訊軟體裡容易被截斷。全非 ASCII 的檔名不能壓成空字串。"""
+    from pathlib import Path as _P
+    assert d._ascii_name(_P("report.pdf")) == "report.pdf"
+    assert d._ascii_name(_P("我的報告.pdf")) == "download.pdf", "全中文檔名要有可用的後備名"
+    assert d._ascii_name(_P("v1.2 測試檔.zip")) == "v1.2.zip"
+    assert d._ascii_name(_P("無副檔名")) == "download"
+    ok("_ascii_name 壓成 ASCII 且全中文檔名不會變空字串")
+
+
+def test_share_disabled_falls_back() -> None:
+    """未設定 SHARE_SCRIPT（開源預設）時，大檔必須退回原本的「檔案太大」訊息，
+    絕不能去執行不存在的腳本。"""
+    import asyncio
+    from pathlib import Path
+
+    class _FakeSent:
+        def __init__(self) -> None:
+            self.content = ""
+
+    class _FakeChannel:
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+
+        async def send(self, content: str | None = None, **kw: object) -> _FakeSent:
+            self.sent.append(content or "")
+            return _FakeSent()
+
+    orig = d._SHARE_SCRIPT
+    d._SHARE_SCRIPT = ""
+    try:
+        ch = _FakeChannel()
+        # 用本測試檔自己當「大檔」：只會被讀 stat()，不會真的上傳
+        shared = asyncio.run(d._share_big_file(ch, Path(__file__), False))
+        assert shared is False, "沒有分享通道就不該宣稱已佔用"
+        assert len(ch.sent) == 1 and "limit" in ch.sent[0], ch.sent
+    finally:
+        d._SHARE_SCRIPT = orig
+    ok("未設定 SHARE_SCRIPT 時大檔退回原本的過大提示")
+
+
 def test_auto_compact_expects_no_assistant() -> None:
     """自動壓縮必須關掉「這一輪要有 AssistantMessage」的判準。
 
@@ -636,6 +678,8 @@ def main() -> None:
     test_atomic_write_text()
     test_queue_while_busy()
     test_upload_limit()
+    test_ascii_name()
+    test_share_disabled_falls_back()
     test_auto_compact_expects_no_assistant()
     print(f"✅ 全部通過（{passed} 項）")
 

@@ -122,6 +122,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "file_not_found": "⚠️ File not found: `{fp}`",
         "file_too_large": "⚠️ File exceeds this server's upload limit: `{name}`\nPath: `{fp}`",
         "file_upload_failed": "⚠️ Upload failed `{name}`: {e}",
+        # 超過上限改走臨時下載連結（網址不可包在程式碼區塊裡，否則點不了）
+        "file_sharing": "📦 `{name}` ({size}) exceeds the upload limit, creating a download link...",
+        "file_shared": "📦 **{name}** ({size})\n{url}\nResumable download, link expires in {hours}h.",
+        "file_share_failed": "⚠️ `{name}` is too large and the download link failed ({e})\nPath: `{fp}`",
         "reply_long_preview": "\n\n…(long content — full version attached 📄)",
         # 錯誤處理
         "session_auto_cleared": "\n(session auto-cleared; your next message starts a fresh conversation)",
@@ -661,6 +665,9 @@ _STRINGS: dict[str, dict[str, str]] = {
         "file_not_found": "⚠️ 找不到檔案：`{fp}`",
         "file_too_large": "⚠️ 檔案超過本伺服器的上傳上限：`{name}`\n路徑：`{fp}`",
         "file_upload_failed": "⚠️ 上傳失敗 `{name}`：{e}",
+        "file_sharing": "📦 `{name}`（{size}）超過上傳上限，正在建立下載連結...",
+        "file_shared": "📦 **{name}**（{size}）\n{url}\n支援續傳，連結 {hours} 小時後自動失效。",
+        "file_share_failed": "⚠️ `{name}` 太大，且建立下載連結失敗（{e}）\n路徑：`{fp}`",
         "reply_long_preview": "\n\n…（內容較長，完整版見附件 📄）",
         "session_auto_cleared": "\n（已自動清除 session，下一則訊息會開新對話）",
         "official_status": "\n（官方狀態：{inc}）",
