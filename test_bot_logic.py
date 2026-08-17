@@ -550,6 +550,20 @@ def test_upload_limit() -> None:
     ok("_upload_limit 跟隨伺服器加成等級（10.25MB 檔案不再誤判可傳）")
 
 
+def test_pick_title_line() -> None:
+    """模型偶爾會在標題前多打一行前言，照舊無條件取第一行就會把前言當成頻道名
+    （2026-08-17 實案：頻道被命名為「我給個建議：」）。以冒號結尾的前言要跳過，
+    單行輸出的行為必須完全不變。"""
+    assert d._pick_title_line("cc-bot 開源版同步") == "cc-bot 開源版同步"
+    assert d._pick_title_line("我給個建議：\ncc-bot 開源版同步") == "cc-bot 開源版同步"
+    assert d._pick_title_line("Here is the title:\nSync the public repo") == "Sync the public repo"
+    assert d._pick_title_line("\n\n  正常標題  \n") == "正常標題"
+    # 整段都是前言、後面沒有內容：原樣交回，由 _generate_title 判成「不改名」
+    assert d._pick_title_line("我給個建議：") == "我給個建議："
+    assert d._pick_title_line("") == ""
+    ok("_pick_title_line 跳過冒號結尾的前言，單行輸出不受影響")
+
+
 def test_ascii_name() -> None:
     """分享連結的檔名要壓成 ASCII：非 ASCII 檔名會變成一長串百分號編碼，
     在通訊軟體裡容易被截斷。全非 ASCII 的檔名不能壓成空字串。"""
@@ -678,6 +692,7 @@ def main() -> None:
     test_atomic_write_text()
     test_queue_while_busy()
     test_upload_limit()
+    test_pick_title_line()
     test_ascii_name()
     test_share_disabled_falls_back()
     test_auto_compact_expects_no_assistant()

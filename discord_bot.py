@@ -1110,14 +1110,31 @@ async def _ask_haiku(prompt: str, model: Optional[str] = "claude-haiku-4-5-20251
     _purge_title_shell(meta_sid)   # no-session-persistence 偶爾仍被 CLI auto-title 搶寫成空殼，用完即焚
     return out.strip()
 
+def _pick_title_line(raw: str) -> str:
+    """從模型輸出裡挑出真正的標題行。
+    prompt 已要求「只輸出標題本身」，但模型偶爾仍會多打一行前言，照舊無條件取第一行
+    就會把前言當成標題存進頻道名（2026-08-17 實案：頻道被命名為「我給個建議：」，
+    真正的標題在第二行被丟掉）。前言的可靠特徵是以冒號結尾——標題不會這樣收尾——
+    故只跳過「以冒號結尾且後面還有內容」的行，單行輸出的既有行為完全不變。"""
+    lines = [ln.strip() for ln in (raw or "").strip().splitlines()]
+    lines = [ln for ln in lines if ln]
+    for i, ln in enumerate(lines):
+        if ln.endswith((":", "：")) and i + 1 < len(lines):
+            continue
+        return ln
+    return ""
+
 async def _generate_title(session_id: str) -> Optional[str]:
     """讀 session 內容，用 Haiku 生成一個貼切的短標題（語言跟介面語系走）。"""
     text = _read_session_text(session_id)
     if not text:
         return None
     raw = await _ask_haiku(t("title_prompt") + text)
-    title = (raw or "").strip().splitlines()[0] if raw else ""
+    title = _pick_title_line(raw)
     title = title.strip('「」"\'*#＊ 　')[:40]   # 去掉引號、markdown 符號、前後空白
+    # 防呆：只剩前言（整段輸出都以冒號結尾）就別改名——掛個怪名字比維持原名更糟
+    if title.endswith((":", "：")):
+        return None
     # 防呆：錯誤訊息不准當標題——回合失敗時 session 內容就是錯誤文字，曾把
     # 「Failed to authenticate. API Error: 401」存成標題＋頻道名（2026-07-21 實案）
     if title and re.search(r"(?i)failed to authenticate|api error|oauth|\b401\b", title):
