@@ -188,6 +188,17 @@ every startup by creating a `watchdog_enabled` marker file. To stop the bot
 **without** it being auto-revived, double-click `stop_bot.vbs` — it disarms the
 watchdog first, then kills the bot. Any normal start re-arms it automatically.
 
+The watchdog restarts through `_restart_now.ps1` rather than `restart_bot.vbs`,
+for two reasons worth knowing if you ever restart the bot yourself. First, every
+launch path redirects with a single `>`, so starting the bot **truncates**
+`discord_bot.log` — destroying the crash output from the run that just died,
+which is the one thing worth reading at that moment; the script rolls it to
+`discord_bot.log.1` first. Second, the script re-launches itself through WMI
+before killing anything: a restart triggered from inside a Claude Code session
+would otherwise be reaped by its own `taskkill /F /T`, since that session is a
+child of the bot — the bot gets killed and never comes back. Progress is logged
+to `restart.log`.
+
 > **Won't start, and the log is empty?** The launcher needs a working Python with
 > the dependencies. It looks for a virtualenv named `.venv` or `venv` in the
 > project folder, and otherwise falls back to the `py` launcher. Make sure you

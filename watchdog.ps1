@@ -7,4 +7,9 @@ if (-not (Test-Path $marker)) { exit 0 }
 $alive = Get-NetTCPConnection -LocalPort 47361 -State Listen -ErrorAction SilentlyContinue
 if ($alive) { exit 0 }
 Add-Content -Path (Join-Path $bot "watchdog.log") -Value "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] bot 未在線，watchdog 自動拉活"
-Start-Process -FilePath "C:\Windows\System32\wscript.exe" -ArgumentList ('"' + (Join-Path $bot "restart_bot.vbs") + '"')
+# 走 _restart_now.ps1 而不是 restart_bot.vbs：後者用 `>` 重導向，一啟動就把
+# discord_bot.log 清空——而 watchdog 拉活的當下，那份 log 正是 bot 為什麼死的
+# 唯一證據。_restart_now.ps1 會先把它輪替成 .log.1 再啟動，死因才留得下來。
+Start-Process -FilePath "powershell.exe" -ArgumentList @(
+  '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + (Join-Path $bot "_restart_now.ps1") + '"')
+) -WindowStyle Hidden
