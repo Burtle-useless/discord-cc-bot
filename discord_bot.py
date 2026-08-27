@@ -89,8 +89,14 @@ def _require_env(key: str) -> str:
     return val
 
 DISCORD_TOKEN   = _require_env("DISCORD_TOKEN")
-# CLAUDE_CLI 選填，預設指向 npm 全域安裝的 claude.cmd（%APPDATA%\npm\claude.cmd）
-CLAUDE_CLI      = os.environ.get("CLAUDE_CLI") or os.path.expandvars(r"%APPDATA%\npm\claude.cmd")
+# CLAUDE_CLI 選填。**不設就交給 SDK 自己找**，它會用 wheel 自帶的 _bundled/claude.exe，
+# 版本與 SDK 同批，不會走鐘。
+#
+# 這裡曾經寫死 %APPDATA%\npm\claude.cmd。新版 claude-agent-sdk 拒絕 spawn 任何
+# .bat/.cmd（Windows 用 cmd.exe 執行批次檔，參數可被注入且沒有可靠的跳脫方式），
+# connect() 會直接拋 CLIConnectionError——而症狀完全不指向這裡：bot 正常上線、
+# 指令收得到，只有真的要跑 CC 的時候失敗。要覆寫請指向原生 .exe，不能是 .cmd shim。
+CLAUDE_CLI      = os.environ.get("CLAUDE_CLI") or None
 # DEFAULT_DIR 選填，預設為使用者家目錄
 DEFAULT_DIR     = Path(os.environ.get("DEFAULT_DIR") or Path.home())
 MAX_MSG        = 1900
