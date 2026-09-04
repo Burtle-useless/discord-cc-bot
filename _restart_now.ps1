@@ -11,7 +11,8 @@ $vbs = "$bot\launch_bot.vbs"
 $applog = "$bot\discord_bot.log"
 $log = "$bot\restart.log"
 $port = 47361
-$marker = 'discord_bot.py'
+# 正則不是萬用字元：cmd.exe 重組命令列時會多插空白，'*-m lu*' 這種寫法對不上
+$marker = '-m\s+lu\b'
 
 function W($m) {
     "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  $m" | Add-Content -Path $log -Encoding utf8
@@ -58,7 +59,7 @@ function Listener {
 # than appending, which makes this failure mode easy to hit.
 function BotProcs {
     Get-CimInstance Win32_Process -Filter "Name='python.exe' OR Name='cmd.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -and $_.CommandLine -like "*$marker*" }
+        Where-Object { $_.CommandLine -and $_.CommandLine -match $marker -and $_.CommandLine -notmatch '--check' }
 }
 
 W '--- restart requested ---'

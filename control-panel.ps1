@@ -1,6 +1,6 @@
 # CC Bot control panel - start / stop / restart the Discord CC bot and view its log.
 # Zero-install WinForms GUI. Launched (hidden console) by control-panel.vbs.
-# Keep this file in the same folder as discord_bot.py and launch_bot.vbs.
+# Keep this file in the same folder as the lu package and launch_bot.vbs.
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
@@ -12,7 +12,7 @@ $bot = @{
     Name  = 'Discord CC Bot'
     Vbs   = Join-Path $root 'launch_bot.vbs'      # how to start it (hidden, picks .venv or python)
     Log   = Join-Path $root 'discord_bot.log'     # where its output is logged
-    Match = 'discord_bot.py'                      # command-line marker used to find its process
+    Match = '-m\s+lu\b'                            # command-line regex used to find its process
 }
 
 # Return the PIDs of the running bot (matched by interpreter name + command line).
@@ -20,7 +20,7 @@ function Get-BotPids {
     Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
         Where-Object {
             ($_.Name -eq 'python.exe' -or $_.Name -eq 'pythonw.exe') -and
-            $_.CommandLine -like "*$($bot.Match)*"
+            $_.CommandLine -match $bot.Match -and $_.CommandLine -notmatch '--check'
         } | Select-Object -ExpandProperty ProcessId
 }
 
