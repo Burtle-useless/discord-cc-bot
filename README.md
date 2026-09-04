@@ -376,8 +376,14 @@ Two rules the code relies on, both of which fail *silently* if broken:
 - **The system-prompt append must not contain a newline.** The CLI's initialize
   handshake stalls for 60 seconds if it does. See `lu/profile.py`.
 
-Want a different personality? `server/personas/*.txt` are plain text — copy one,
-edit the tone, and point `BUTLER_PERSONA` at it. No code changes.
+**There is no personality layer, on purpose.** This front-end is a plain Claude
+Code tool, not a character. What it adds to the system prompt is the
+`system_prompt` string in `lu/i18n.py` — platform facts and formatting rules,
+not a voice. Edit that string if you want to change its behaviour.
+
+(`server/personas/*.txt` belong to the engine's other front-end. Leave the files
+where they are — `engine/options.py` reads them at import time — but nothing on
+the Discord side loads them.)
 
 ---
 

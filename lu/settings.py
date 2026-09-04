@@ -45,8 +45,12 @@ LOCK_PORT: int = 47361
 # 少了這一步，在 .env 裡寫 DEFAULT_MODEL 會完全沒有反應且不報錯。
 # （BUTLER_PORT／BIND／TOKEN 那些是手機 App 伺服器專用的，Discord 這邊沒有意義，不收。）
 ENGINE_ENV_KEYS: tuple[str, ...] = (
-    "CLAUDE_CLI", "DEFAULT_MODEL", "DEFAULT_EFFORT", "BUTLER_PLAN", "BUTLER_PERSONA",
+    "CLAUDE_CLI", "DEFAULT_MODEL", "DEFAULT_EFFORT", "BUTLER_PLAN",
 )
+# BUTLER_PERSONA 不在上面那串：**這個前端刻意沒有人格層**，它就是個 Claude Code
+# 工具。system prompt 的疊加來自 `lu/i18n.py` 的 `system_prompt`（平台事實與格式
+# 規則），不經過 `engine.persona`。`server/personas/*.txt` 是引擎另一個前端在用的，
+# 檔案要留著（engine.options 在 import 當下就會讀），但這裡設了不會有任何反應。
 
 
 @dataclass(frozen=True, slots=True)
