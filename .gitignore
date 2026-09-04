@@ -2,6 +2,12 @@
 .env
 
 # Bot runtime data (generated at runtime, user-specific)
+data/
+# Belt and braces: if BUTLER_DATA_DIR ever fails to get set before the engine's
+# config is imported, state lands here instead. Never commit it either way.
+server/data/
+# Pre-2.0 layout -- migrate_state.py copies these into data/ and leaves the
+# originals alone, so they stay on disk after upgrading.
 discord_session.json
 allowed_users.json
 allowed_channels.json
@@ -23,6 +29,9 @@ __pycache__/
 
 # Temp
 tmp/
+
+# 使用者端說明書，不是公開版的一部分
+_說明書/
 
 # Semantic /search vector cache (generated at runtime, can be tens of MB)
 session_vectors.json

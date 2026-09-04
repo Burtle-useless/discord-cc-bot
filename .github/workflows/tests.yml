@@ -1,4 +1,4 @@
-# 每次 push / PR 跑全部測試（純 assert 腳本，不依賴測試框架）
+# 每次 push / PR 跑全部測試（純 assert 腳本，不依賴測試框架，逐支跑）
 name: tests
 
 on:
@@ -8,19 +8,26 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # 跑 windows 而不是 ubuntu：這個 bot 是 Windows 導向的（.vbs 啟動、
+    # ImageGrab 截圖、Win32_Process 找行程），而 test_boot 會把引擎整個接起來。
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      # test_bot_logic 會 import 主模組，需要這兩個核心相依；
-      # 語音/排程等選配套件都是延遲匯入，不用裝
+      # 引擎與 Discord 層的核心相依。語音／語意搜尋那些是延遲匯入的選配，不用裝
+      # （沒裝時測試會走「退回字面比對」那條路，那本身就是被驗的行為之一）。
       - name: Install core dependencies
-        run: pip install "discord.py>=2.7.1" "claude-agent-sdk>=0.1.81"
+        run: pip install "discord.py>=2.7.1" "claude-agent-sdk>=0.1.81" "croniter>=6.2.2"
+      # 每支各自一個進程：引擎的 config 在 import 當下就把資料目錄凍成常數，
+      # 同一個進程裡跑第二支測試會沿用第一支的暫存目錄。
       - name: Run tests
         run: |
-          python test_i18n.py
-          python test_bot_logic.py
-          python test_coord_core.py
+          python lu/tests/test_boot.py
+          python lu/tests/test_frontend.py
+          python lu/tests/test_memory.py
+          python lu/tests/test_migrate.py
+          python lu/tests/test_render.py
+          python lu/tests/test_schedule.py
           python test_wt_core.py

@@ -33,8 +33,15 @@ commands, searching the web, and more — then streams the result back to you.
 - **Scheduling** — `/schedule` sets up recurring tasks (cron under the hood).
 - **Model & effort control** — switch model (Sonnet / Opus / Haiku) and thinking
   effort on the fly; automatic fallback model when the primary is overloaded.
-- **Resilience** — retries on rate limits (429/529), context auto-compaction,
-  and per-message error isolation so one bad turn won't kill the session.
+- **Talk to it mid-task** — a message sent while a turn is running is injected
+  into that turn, not queued behind it. Claude picks it up at its next step and
+  the message is marked as having cut in.
+- **Long jobs keep running** — background commands report back when they finish
+  and wake Claude to continue on its own, instead of the turn being declared
+  stuck.
+- **Resilience** — waits out rate limits and resumes by itself when the quota
+  resets, context auto-compaction, and per-message error isolation so one bad
+  turn won't kill the session.
 - **Screenshots, usage stats, PowerPoint→PDF** and more.
 
 ---
@@ -52,9 +59,8 @@ bridges (mostly Telegram, mostly single-session and text-only) generally don't:
 - **Voice in *and* out, fully local.** "Drive mode" transcribes your voice
   messages with Whisper and speaks Claude's reply back with F5-TTS — all on your
   own GPU, no cloud STT/TTS. Made for hands-free/driving use.
-- **Multi-session coordination.** Separate sessions can broadcast tasks to a
-  shared channel and watch each other's progress — closer to a small agent team
-  than a single chat.
+- **Interruptible turns.** Send a correction while it's working and it lands in
+  the *current* turn — most bridges make you wait for the reply, then start over.
 - **Git worktree parallelism.** Spin off an isolated worktree per conversation so
   parallel edits don't collide, then merge back from Discord.
 - **Built for trust.** It runs with `bypassPermissions`, so every turn shows the
@@ -148,6 +154,10 @@ copy .env.example .env
 Then open `.env` and fill in `DISCORD_TOKEN` and `ALLOWED_USER`. The rest are
 optional (see comments in the file).
 
+The clone already includes the engine (`server/`) — there is no second repo to
+fetch and nothing to point at. See [Architecture](#architecture) if you want to
+know what lives where.
+
 > **Model & context:** by default the bot uses standard 200K context
 > (`claude-sonnet-4-6`), which works on every plan with no usage credits. Tell
 > the bot your plan with `/plan` and it applies Anthropic's official rule: on
@@ -164,8 +174,13 @@ optional (see comments in the file).
 With the virtualenv active:
 
 ```
-python discord_bot.py
+python -m lu
 ```
+
+To check your configuration without connecting to Discord (useful right after
+editing `.env`), add `--check`: it loads the engine, resolves the model and
+working directory, registers the commands, prints a one-screen summary, and
+exits.
 
 To run it **silently in the background** (no console window), double-click
 `launch_bot.vbs`. It uses the `.venv` Python if present and logs to
@@ -228,20 +243,25 @@ latest.
 
 ## Commands
 
+New conversations are created from the **New chat** button in the sidebar's entry
+channel, not with a command.
+
 | Command | What it does |
 | --- | --- |
-| `/new` | Reset the conversation, start a fresh session |
-| `/continue` | Resume the previous session |
+| `/continue` | Resume the previous session in this channel |
 | `/rename` | Rename the current conversation (blank = auto-title) |
 | `/sessions` | List past conversations and restore one |
 | `/search` | Search past conversations by meaning (semantic; needs `fastembed`, else keyword) |
+| `/recall` | Cross-check what you actually said against the records |
+| `/handoff` | Write a handoff brief so another machine can take over |
 | `/guide` | Built-in user manual — pick a topic, get a plain-language walkthrough |
 | `/stop` | Stop the currently running task |
 | `/status` | Show current status |
-| `/model`, `/effort` | Set the account-wide default model / thinking effort |
-| `/model_session`, `/effort_session` | Override the model / effort for the current chat only |
+| `/model`, `/effort` | Set the model / thinking effort (this chat, or as the default) |
 | `/plan` | Set your subscription plan (applies the official 1M-context rule) |
+| `/confirm` | Toggle the dangerous-action confirmation prompt |
 | `/drive` | Drive mode: voice in, voice out (on/off) |
+| `/worktree` | Give this channel its own git worktree (isolated branch) |
 | `/cd`, `/pwd` | Change / show the working directory |
 | `/screenshot` | Capture the PC screen |
 | `/usage` | Show plan usage (5h / 7d) |
@@ -262,7 +282,9 @@ Some features need extra packages (already listed in `requirements.txt`):
   common pitfall is installing them into the system Python instead, which leaves
   the bot unable to load `cublas64_12.dll` and voice transcription fails.
 - **`/schedule`** → `croniter`.
-- **PowerPoint → PDF** → `pywin32` + Microsoft PowerPoint installed.
+- **`/screenshot`** → `Pillow`.
+- **`/search` by meaning** → `fastembed` (CPU-only, no PyTorch). Without it,
+  `/search` silently falls back to literal keyword matching.
 
 If you don't want a feature, you can skip its dependency.
 
@@ -325,6 +347,37 @@ pip install f5-tts
    silently fall back to text. On GPU, synthesis is a few seconds per reply.
 
 The first `/drive on` downloads the F5-TTS model (~1.3 GB) and its vocoder.
+
+---
+
+## Architecture
+
+Two layers, and the split is worth knowing before you change anything:
+
+```
+lu/          Discord front-end: slash commands, the sidebar, rendering a turn
+             into Discord messages, voice, permissions. No turn logic at all.
+server/      The engine: queueing, steering a running turn, rate-limit waits and
+             auto-resume, context compaction, background-task wake-ups, session
+             state, model catalogue, personas.
+drive_core.py, wt_core.py    Optional standalone modules (voice, git worktrees).
+```
+
+`server/` is a **complete copy that ships with this repo** — clone and it works.
+Nothing external to install or point at. The same engine also drives a phone-app
+front-end the author maintains separately; this repo does not depend on it.
+
+Two rules the code relies on, both of which fail *silently* if broken:
+
+- **`bootstrap.prepare()` must run before any `engine` module is imported.**
+  `server/config.py` freezes `DATA_DIR` at import time, so a late
+  `BUTLER_DATA_DIR` sends your sessions to `server/data/` instead of `data/`.
+  That's why every `engine` import inside `lu/bootstrap.py` is function-local.
+- **The system-prompt append must not contain a newline.** The CLI's initialize
+  handshake stalls for 60 seconds if it does. See `lu/profile.py`.
+
+Want a different personality? `server/personas/*.txt` are plain text — copy one,
+edit the tone, and point `BUTLER_PERSONA` at it. No code changes.
 
 ---
 
