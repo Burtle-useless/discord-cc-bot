@@ -64,6 +64,7 @@ def _head_scan(jf: Path) -> dict[str, Any] | None:
     整個檔頭什麼都撈不到才回 None。
     """
     fallback: dict[str, Any] | None = None      # 第一筆帶 cwd 的記錄，當退路
+    entrypoint = ""                             # 這條 session 是誰開的（sdk-py／claude-desktop）
     try:
         with jf.open(encoding="utf-8", errors="replace") as f:
             for i, line in enumerate(f):
@@ -73,6 +74,8 @@ def _head_scan(jf: Path) -> dict[str, Any] | None:
                     r = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                if not entrypoint and r.get("entrypoint"):
+                    entrypoint = str(r["entrypoint"])
                 if fallback is None and r.get("cwd"):
                     fallback = r
                 if r.get("type") != "user" or r.get("isCompactSummary"):
@@ -81,10 +84,34 @@ def _head_scan(jf: Path) -> dict[str, Any] | None:
                 if not text or text.startswith(_NOISE_PREFIX):
                     # 有雜訊但仍拿得到 cwd，先記著，繼續往下找像樣的開場白
                     continue
-                return {"text": text, "rec": r}
+                return {"text": text, "rec": r,
+                        "entrypoint": entrypoint or str(r.get("entrypoint") or "")}
     except OSError:
         return None
-    return {"text": "", "rec": fallback} if fallback else None
+    return {"text": "", "rec": fallback, "entrypoint": entrypoint} if fallback else None
+
+
+# 本專案的前端（手機 App／Discord bot）發訊時蓋在第一則訊息上的時間戳，
+# 例如 `[09/05 週六 11:34 手機] …`。有這個＝人真的打過字
+# （turn.stamp 只蓋在真實使用者訊息上）。
+_STAMP_RE = re.compile(r"^\[\d{2}/\d{2} 週. \d{2}:\d{2}")
+
+
+def _user_initiated(entrypoint: str, first_text: str) -> bool:
+    """這條 session 是不是「由人發起」。
+
+    清單要的是「人真的講過話」的對話；混進來的雜訊全是程式自己開的 SDK
+    client——模型探測、標題生成、一次性測試——它們的 entrypoint 一律是
+    `sdk-py`，而人經由本專案前端講的第一句話一定帶 stamp 前綴。所以：
+    **非 SDK 一律當人**（官方桌面 App 是 claude-desktop，終端 CLI 若有
+    別的值也一樣放行），**SDK 的要驗前綴**。
+
+    代價說在前面：比 stamp 機制更早的舊對話沒有前綴，會一併被濾掉——
+    要接舊對話的機率遠低於每天被測試雜訊淹沒的成本。
+    """
+    if entrypoint and entrypoint != "sdk-py":
+        return True
+    return bool(_STAMP_RE.match(first_text))
 
 
 def _any_record_with_cwd(jf: Path) -> dict[str, Any] | None:
@@ -146,7 +173,9 @@ def scan_sessions(limit: int = 60, q: str = "", offset: int = 0) -> list[dict]:
 
     # 有搜尋字串時要多翻幾頁才湊得滿，沒有的話多讀就是白工。
     # 第二頁以後要連前面幾頁一起重掃（無狀態分頁），所以額度算的是 offset+limit。
-    budget = len(cands) if q else min(len(cands), (offset + limit) * 2)
+    # 倍率 5 不是 2：來源過濾會把 SDK 測試雜訊整批丟掉，
+    # 倍率太小會湊不滿一頁還以為到底了。
+    budget = len(cands) if q else min(len(cands), (offset + limit) * 5)
     needle = q.strip().lower()
 
     out: list[dict] = []
@@ -155,6 +184,9 @@ def scan_sessions(limit: int = 60, q: str = "", offset: int = 0) -> list[dict]:
         hit = _head_scan(jf)
         rec = hit["rec"] if hit else None
         if rec is None:
+            continue
+        # 程式自己開的 session（探測、標題生成、測試）不列——見 _user_initiated
+        if not _user_initiated(hit.get("entrypoint", ""), hit["text"]):
             continue
         cwd = str(rec.get("cwd") or "")
         title = " ".join(hit["text"].split())[:_TITLE_MAX]
