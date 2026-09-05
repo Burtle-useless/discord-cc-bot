@@ -256,6 +256,11 @@ async def run_turn(
     # 先前一律 600 秒就 raise TimeoutError → finally drop → 整個 CLI 連同背景工作陪葬。
     tools_pending: set[str] = set()
     client_ref: list[Any] = [None]   # 逾時時要對它 interrupt()，讀取階段才有值
+    # 這一步的回覆裡出現了 [[ASK:]]。prompt 早就要求「打了標記就停下來等回答」，
+    # 但那是請求不是保證：實際發生過問完之後自己繼續往下做，選項卡停在半空中，
+    # 使用者根本沒發現有東西在等。這裡改成硬擋。
+    ask_pending = [False]
+    ask_interrupted = [False]        # 只打斷一次，收不掉就交給原本的閒置逾時
     deltas = _DeltaBuffer(frontend, conv, turn_id)
 
     async def _commit_step(am: Any) -> None:
@@ -285,6 +290,9 @@ async def run_turn(
         # 留著就是洩漏。先前只有最後那則 reply.final 清，step.commit 直接送原文——
         # 於是 [[ASK:問題|選項…]] 整串以文字畫在畫面上，下面才是選項卡
         # （2026-09-04 使用者截圖回報）。
+        # 標記要在 clean 之前看：clean_reply 會把它整串剝掉。
+        if parse_ask_marker(step_text) is not None:
+            ask_pending[0] = True
         step_text = clean_reply(step_text)
         if digest or step_text:
             await frontend.emit(make_event(
@@ -553,6 +561,14 @@ async def run_turn(
             await asyncio.wait({client_task}, timeout=IDLE_POLL_SEC)
             if client_task.done():
                 break
+            # **打了 [[ASK:]] 就停在這裡等回答。** 提早收工不是逾時，所以走的是
+            # interrupt（CLI 自己收出一則 Result、迴圈正常走完、reply.final 照發，
+            # 選項按鈕也跟著出來），不是底下那條 TimeoutError → drop 的路。
+            # 收不掉就算了，讓原本的閒置逾時接手，不要為了停住而把回合弄壞。
+            if ask_pending[0] and not ask_interrupted[0]:
+                ask_interrupted[0] = True
+                await _interrupt_then_wait(client_ref[0], client_task)
+                continue
             # 有工具在跑就放寬：等一個沒輸出的工具跑完不是卡死
             limit = (config.TOOL_INACTIVITY_TIMEOUT if tools_pending
                      else config.INACTIVITY_TIMEOUT)

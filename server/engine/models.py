@@ -81,6 +81,18 @@ _FALLBACK: tuple[ModelInfo, ...] = (
 )
 
 
+# CLI 清單落後官方發佈時的補充：後端已認得、initialize 清單還沒列的模型。
+# 退場不用人工——比對是照 resolved id 做的，CLI 哪天收錄了同一顆，這裡那筆就
+# 自動不再出現。**進場前要實測**：直接拿 id 開一個 client 跑一句話，能跑才加，
+# 不然面板上會多一顆選了就炸的模型。
+_KNOWN_EXTRA: tuple[ModelInfo, ...] = (
+    # Fable 5.1（官方 2026-09-01 發佈）。CLI 2.1.259 的清單仍只有 Fable 5，
+    # 但 claude-fable-5-1 與 [1m] 別名實測都能跑（scratchpad/fable51_probe）。
+    ModelInfo("claude-fable-5-1[1m]", "claude-fable-5-1", "Fable 5.1",
+              "Fable 5.1 · For demanding reasoning and long-horizon agentic work"),
+)
+
+
 @dataclass
 class _Catalog:
     models: list[ModelInfo] = field(default_factory=list)
@@ -128,8 +140,22 @@ _load_cache()
 
 
 def catalog() -> list[ModelInfo]:
-    """目前知道的模型清單（CLI → 快取 → 內建後備）。"""
-    return list(_cat.models) if _cat.models else list(_FALLBACK)
+    """目前知道的模型清單（CLI → 快取 → 內建後備），再補上清單還沒跟上的新模型。
+
+    補充插在同家族的正後面（resolved 的共同字首），沒有同家族才排最後——
+    Fable 5.1 要出現在 Fable 旁邊，不是壓在清單最底下。
+    """
+    base = list(_cat.models) if _cat.models else list(_FALLBACK)
+    known = {m.value for m in base} | {m.resolved for m in base if m.resolved}
+    for extra in _KNOWN_EXTRA:
+        if extra.value in known or extra.resolved in known:
+            continue
+        stem = extra.resolved.rsplit("-", 2)[0]      # claude-fable-5-1 → claude-fable
+        at = next((i + 1 for i in reversed(range(len(base)))
+                   if base[i].resolved.startswith(stem) or base[i].value.startswith(stem)),
+                  len(base))
+        base.insert(at, extra)
+    return base
 
 
 def values() -> list[str]:
