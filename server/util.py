@@ -2,9 +2,25 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 import uuid
 from pathlib import Path
+
+# CC 的 session id 一律是標準 UUID 字串。
+_SESSION_ID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+
+def is_session_id(s: object) -> bool:
+    """[s] 是不是一個 session id 的樣子（標準 UUID）。
+
+    session id 會被拼進 `~/.claude/projects/*/<id>.jsonl` 的 glob 去找逐字稿。
+    接管端點的 id 若沒驗就拿去 glob，傳 `*` 會對到任意一份 session，
+    接著被複印、接管。**凡是來自請求的 id，拼進路徑之前一律先過這一關。**
+    """
+    return isinstance(s, str) and bool(_SESSION_ID_RE.match(s))
 
 # 撞上檔案鎖時重試幾次。退讓從 5ms 遞增到 50ms 封頂，30 次的總上限約 1.3 秒。
 # 這個數字是量出來的不是猜的：`tests/test_p1_misc.py` 用 4 條執行緒不間斷讀同一個檔，

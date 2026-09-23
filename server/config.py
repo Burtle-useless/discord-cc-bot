@@ -18,7 +18,7 @@ from typing import Final
 # 洗掉「上層 Claude session 洩漏的環境變數」：本服務多半是從桌面 app 的 CC 殼啟動的，
 # 會繼承 ANTHROPIC_BASE_URL（指向 app 的本機代理）與 CLAUDE_CODE_* 等 session 變數，
 # CC 子進程因此改走別人的短命憑證，token 一輪換就整批 401、重新登入也救不回
-# （cc-bot 2026-07-21 實案，症狀完全不指向環境變數，卡了數小時）。
+# （另一個同源前端 2026-07-21 的實案，症狀完全不指向環境變數，卡了數小時）。
 # 開機即清，CC 一律用本機 claude 登入憑證，不受啟動來源污染。
 _LEAKED_KEYS: Final[tuple[str, ...]] = (
     "ANTHROPIC_BASE_URL", "CLAUDECODE", "CLAUDE_AGENT_SDK_VERSION",
@@ -67,6 +67,51 @@ SCHEDULES_FILE: Final[Path] = DATA_DIR / "schedules.json"
 DEFAULT_CWD: Final[Path] = Path(os.environ.get("BUTLER_CWD") or Path.home())
 # dev_console.py 用哪一條對話；人格測試要用乾淨的新對話時從環境變數指定。
 DEV_CONSOLE_CONV: Final[str] = os.environ.get("BUTLER_CONV") or "dev-console"
+
+# ── 課程資料層 ───────────────────────────────────────────────────────────────
+#
+# 課程頁（App 的分頁之一）直接讀這個目錄底下的資料夾，一門課一個
+# （index.md／log.md／raw／notes／對話）。課程對話的 system prompt 也會帶上
+# 對應那門課的路徑，模型才知道該把整理出來的東西寫到哪去。
+#
+# 預設放在家目錄底下；要換位置設 `BUTLER_COURSES_DIR`。目錄不存在時課程頁
+# 就是一片空的，不會報錯——還沒開始用這個功能的人不該被一個錯誤訊息攔住。
+#
+# 課表一變，伺服器就會在這裡**建資料夾**（courses.workspaces：課表上每門課都要有
+# 工作區），所以資料目錄不是正式那份的時候（測試、借引擎用的其他實例）不准指到
+# 正式的這一份：沒明講就落在自己資料目錄底下，跟 `_data_dir` 同一個理由——
+# 測試不該有辦法碰到正式資料。
+def _courses_dir() -> Path:
+    override = os.environ.get("BUTLER_COURSES_DIR")
+    if override:
+        return Path(override)
+    if DATA_DIR != SERVER_DIR / "data":
+        return DATA_DIR / "courses"
+    return Path.home() / "courses"
+
+
+COURSES_DIR: Final[Path] = _courses_dir()
+
+
+def _courses_enabled() -> bool:
+    """課程功能開不開。`BUTLER_COURSES` 說了算，沒說就看目錄在不在。
+
+    預設「看目錄在不在」而不是預設開：這是選配功能，沒在用的人不該看到一個
+    空分頁，模型也不該拿到一份講「把提問記到某個資料夾」的 system prompt——
+    那會讓它在完全無關的對話裡想去寫那些檔案。
+
+    反過來也要能明確關掉：目錄剛好叫那個名字、但不是拿來當課程用的人，
+    設 `BUTLER_COURSES=0` 就好。
+    """
+    raw = (os.environ.get("BUTLER_COURSES") or "").strip().lower()
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    return COURSES_DIR.is_dir()
+
+
+COURSES_ENABLED: Final[bool] = _courses_enabled()
 
 
 def claude_projects_dir() -> Path:
@@ -251,7 +296,7 @@ FALLBACK_MODEL: Final[str] = "claude-sonnet-4-6"      # 主模型過載時的備
 DEFAULT_EFFORT: Final[str] = os.environ.get("DEFAULT_EFFORT") or "medium"
 MAX_BUFFER_SIZE: Final[int] = 64 * 1024 * 1024        # stream-json 解析 buffer 上限
 
-# client 進程池：cc-bot 用 8，本服務刻意壓到 3。
+# client 進程池：另一個同源前端用 8，本服務刻意壓到 3。
 # 兩套引擎共用同一個 Claude 帳號，加起來的 Node 子進程數與 rate limit 都是共用的。
 MAX_CLIENTS: Final[int] = 3
 CLIENT_IDLE_TIMEOUT: Final[int] = 900                 # 閒置逾時：超過即回收該對話的 client
@@ -268,7 +313,7 @@ MAX_AUTO_CONTINUE: Final[int] = 2                     # 未打完成標記時的
 # 人在外面最需要被通知的那種，而「該不該出聲」手機端判得更準。見 turn._turn_done。
 
 # ── 安全 ─────────────────────────────────────────────────────────────────────
-# 破壞性指令確認：cc-bot 預設關（人坐在電腦前看得到螢幕），
+# 破壞性指令確認：桌面端的前端預設關（人坐在電腦前看得到螢幕），
 # 本服務預設**開**——使用情境是人在外面、電腦在家，沒有人在螢幕前把關。
 CONFIRM_ENABLED: Final[bool] = (os.environ.get("CONFIRM_DANGEROUS") or "1").strip() == "1"
 # 刻意小於 INACTIVITY_TIMEOUT，確認等待期間才不會被誤判成卡死

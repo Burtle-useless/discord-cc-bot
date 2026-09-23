@@ -3,7 +3,7 @@
 跟另外兩支的分工（三件事，不要混）：
   usage.py      ── 走助理這條路的回合，butler 自己記的帳
   plan_usage.py ── 訂閱方案還剩多少額度，全帳號，含網頁版與手機 App
-  local_usage.py ── 這台電腦上所有 CC 的 token，含 cc-bot 與終端機直接開的
+  local_usage.py ── 這台電腦上所有 CC 的 token，含其他前端與終端機直接開的
 
 plan_usage 給的是「總量剩多少」，回答不了「被誰吃掉的」。這支補的就是組成：
 資料來源是 ~/.claude/projects 下的逐字稿，每則回應都帶著 usage 欄位。

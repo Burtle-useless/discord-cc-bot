@@ -38,7 +38,7 @@ _KINDS: tuple[Kind, ...] = ("events", "alarms", "ledger", "courses")
 PERIODS_KEY = "periods"
 
 # 每個學校的節次時間都不一樣，這裡只是**預設值**，讓課表一開始就有東西可用；
-# 使用者在 App 上改過就以他的為準（見 set_periods）。
+# 在 App 上改過就以那份為準（見 set_periods）。
 # 這組是台灣多數大學的常見排法：整點過十分上課、每節五十分鐘、中午空一節。
 DEFAULT_PERIODS: tuple[dict[str, Any], ...] = (
     {"no": 1, "start": "08:10", "end": "09:00"},
@@ -54,6 +54,11 @@ DEFAULT_PERIODS: tuple[dict[str, Any], ...] = (
     {"no": 11, "start": "19:25", "end": "20:15"},
     {"no": 12, "start": "20:20", "end": "21:10"},
 )
+
+# 現在是哪個學期（「115-1」）。跟節次表一樣不是 _KINDS 的一員：它是一個值不是一批東西。
+# 換學期時整份課表收進封存、這裡換成下一個（見 courses.semester）；沒記過就是空字串，
+# 由讀的人照日期推（見 courses.semester.current_label）。
+SEMESTER_KEY = "semester"
 
 # 一天最多幾節。上限存在的理由是擋掉「第 300 節」這種明顯的手滑，
 # 不是為了對齊 DEFAULT_PERIODS 的長度——節次表可以被改成更多或更少節。
@@ -74,8 +79,12 @@ class AgendaError(ValueError):
     """輸入不合法。訊息會直接給助理看，所以要寫成它讀得懂的中文。"""
 
 
-def _empty() -> dict[str, list[dict[str, Any]]]:
-    return {**{k: [] for k in _KINDS}, PERIODS_KEY: [dict(p) for p in DEFAULT_PERIODS]}
+def _empty() -> dict[str, Any]:
+    return {
+        **{k: [] for k in _KINDS},
+        PERIODS_KEY: [dict(p) for p in DEFAULT_PERIODS],
+        SEMESTER_KEY: "",
+    }
 
 
 def _quarantine(path: Path, why: str) -> None:
@@ -127,10 +136,12 @@ def _load() -> dict[str, list[dict[str, Any]]]:
     # 舊的 agenda.json 沒有 periods（課表是後來才加的）。補預設而不是留空：
     # 空的節次表會讓課表畫面一片空白，而使用者根本不知道少了什麼。
     data[PERIODS_KEY] = list(raw.get(PERIODS_KEY) or [dict(p) for p in DEFAULT_PERIODS])
+    # 這裡是**白名單重建**，沒列到的 key 下一次存檔就消失——學期代號一定要帶過去
+    data[SEMESTER_KEY] = str(raw.get(SEMESTER_KEY) or "")
     return data
 
 
-def _save(data: dict[str, list[dict[str, Any]]]) -> None:
+def _save(data: dict[str, Any]) -> None:
     """先寫暫存檔再 replace：寫到一半斷電不會留下半個 JSON。"""
     AGENDA_FILE.parent.mkdir(parents=True, exist_ok=True)
     tmp = AGENDA_FILE.with_suffix(".json.tmp")
@@ -398,6 +409,9 @@ def add_course(
         "teacher": str(teacher or "").strip()[:40],
         "room": str(room or "").strip()[:40],
         "note": str(note or "").strip()[:200],
+        # 這門課的工作區資料夾名，由 courses.workspaces.sync 對好之後寫回來。
+        # 先放空字串佔位：update 只改本來就有的欄位（見 [update]），沒有這格就寫不進去
+        "folder": "",
     }
     with _LOCK:
         data = _load()
@@ -486,6 +500,64 @@ def set_periods(rows: Any) -> list[dict[str, Any]]:
     return out
 
 
+def set_course_folders(folders: dict[str, str]) -> int:
+    """把「這堂課的工作區是哪個資料夾」寫回課表。[folders] 是 課程 id → 資料夾名。
+
+    回傳實際改了幾筆；全都本來就對就不存檔。只給 courses.workspaces.sync 用——
+    資料夾名是它對出來的結果，不是使用者輸入，所以不走 [update] 那套欄位驗證。
+    """
+    with _LOCK:
+        data = _load()
+        n = 0
+        for row in data["courses"]:
+            want = folders.get(row["id"])
+            if want and row.get("folder") != want:
+                row["folder"] = want
+                n += 1
+        if n:
+            _save(data)
+    return n
+
+
+def get_semester() -> str:
+    """記在課表裡的學期代號（「115-1」）；沒記過是空字串。"""
+    return _load()[SEMESTER_KEY]
+
+
+def set_semester(label: str) -> None:
+    with _LOCK:
+        data = _load()
+        data[SEMESTER_KEY] = label
+        _save(data)
+
+
+def clear_courses(next_semester: str) -> dict[str, Any]:
+    """換學期：課表清空、學期代號換成下一個，回傳清掉之前的那一份（封存用）。
+
+    節次表留著——同一間學校，下學期的第幾節還是幾點到幾點。
+    """
+    with _LOCK:
+        data = _load()
+        before = {
+            SEMESTER_KEY: data[SEMESTER_KEY],
+            "courses": data["courses"],
+            PERIODS_KEY: data[PERIODS_KEY],
+        }
+        data["courses"] = []
+        data[SEMESTER_KEY] = next_semester
+        _save(data)
+    return before
+
+
+def restore_courses(snapshot: dict[str, Any]) -> None:
+    """把 [clear_courses] 清掉的課表放回去。換學期後面的步驟失敗時退回用。"""
+    with _LOCK:
+        data = _load()
+        data["courses"] = list(snapshot.get("courses") or [])
+        data[SEMESTER_KEY] = str(snapshot.get(SEMESTER_KEY) or "")
+        _save(data)
+
+
 def now_status() -> dict[str, Any]:
     """現在是星期幾第幾節、正在上什麼課、下一堂是什麼。
 
@@ -531,8 +603,8 @@ def now_status() -> dict[str, Any]:
 
 
 # ── 共用的讀取與修改 ─────────────────────────────────────────────────────────
-def list_all() -> dict[str, list[dict[str, Any]]]:
-    """四類加節次表全給。App 打開日常頁就是要全部，分幾次拉只是多幾趟往返。"""
+def list_all() -> dict[str, Any]:
+    """四類加節次表與學期代號全給。App 打開日常頁就是要全部，分幾次拉只是多幾趟往返。"""
     return _load()
 
 

@@ -2,7 +2,7 @@
 
 原本長在 transport/app.py 裡，但它用到的全是 engine 的東西（`load_history`、
 `generate_title`、`state.set_title`、`conv_renamed` 事件），跟 HTTP 無關；
-cc-bot 那邊也要同一套。這裡拿的是一個 `protocol.Frontend`，不知道 SSE 的存在——
+別的前端那邊也要同一套。這裡拿的是一個 `protocol.Frontend`，不知道 SSE 的存在——
 要用哪個 frontend 由呼叫端（transport）決定並帶進來。
 """
 from __future__ import annotations
@@ -18,7 +18,7 @@ def title_source(conv_id: str, first_message: str) -> str:
     """挑一段拿去生標題的文字：優先用整輪對話，讀不到才退回第一則訊息。
 
     只讀第一則訊息生不出好標題——開場常常是「幫我看一下」「這個怎麼壞了」，
-    本身沒有資訊量，助理的回答才有。cc-bot 一直是讀 session 內容的，這裡對齊它。
+    本身沒有資訊量，助理的回答才有。另一個前端一直是讀 session 內容的，這裡對齊它。
 
     走 load_history 而不是自己開 jsonl：它已經濾掉 compact 摘要與各種維運注入
     （續跑提示、<task-notification>…），那些混進來會直接變成標題。
@@ -80,7 +80,7 @@ async def autoname(conv_id: str, first_message: str, frontend: Frontend) -> None
     整段包 try/except 的理由：這是 create_task 起的背景任務，丟出的例外不會
     冒到請求端，asyncio 只在 log 裡留一行「Task exception was never retrieved」。
     2026-08-15 就是這樣——傳錯型別炸了 7 次，對外症狀只是「標題一直生不出來」，
-    看起來像 Haiku 沒回應，實際上根本沒送出去。cc-bot 的 _autoname_channel
+    看起來像 Haiku 沒回應，實際上根本沒送出去。另一個前端的自動命名
     一直是這樣包的，搬過來時漏掉了。
     """
     try:

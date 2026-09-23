@@ -3,8 +3,8 @@
 這是黑名單，擋常見偽裝、不擋決心——真正的隔離要靠沙箱或白名單（架構級改動）。
 在「人不在電腦前」的使用情境下，它是唯一一道人為把關，所以 config 的預設是開。
 
-**但它可以整個被啟動環境關掉，而且這台機器上就是關的。** `config.CONFIRM_ENABLED`
-讀環境變數 `CONFIRM_DANGEROUS`，`launch_butler.vbs` 寫死了 `=0`（使用者自己的選擇）：
+**但它可以整個被啟動環境關掉。** `config.CONFIRM_ENABLED` 讀環境變數
+`CONFIRM_DANGEROUS`，啟動腳本把它設成 `0` 就是關：
 關閉時 `needs_confirm` 第一行就回 False，破壞性指令**不會跳確認、直接執行**。
 現在的狀態從 `/v1/settings` 的 `confirm_dangerous` 欄位看得到，不必猜。
 """

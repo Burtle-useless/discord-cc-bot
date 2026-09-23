@@ -1,7 +1,7 @@
 """回合管線：一則使用者訊息的完整生命週期。
 
-這一層是整個引擎「可靠性密度」最高的地方，內容幾乎全部來自 cc-bot 一年份的災情
-（`discord_bot.py` 3596-3718 行）。單看每一段都像過度防禦，但每一段都對應一次真實故障：
+這一層是整個引擎「可靠性密度」最高的地方，內容幾乎全部來自同一套引擎另一個前端
+一年份的災情。單看每一段都像過度防禦，但每一段都對應一次真實故障：
 
 - 空回覆三層防線 → 上游 #50597：模型只產思考塊、一個字不寫就 end_turn
 - 自動續跑 → 任務做到一半停手，使用者看到半成品以為做完了
@@ -21,14 +21,14 @@ from typing import Any
 import config
 from protocol import AskChoice, AskRequest, AskResponse, Event, Frontend, make_event
 
-from . import client_pool, diag
+from . import client_pool, diag, rotation
 from .errors import CCError, wrap
 from .fold import NO_RESPONSE, think_digest
 from .mailbox import WakeTicket
 from .runner import TurnResult, run_turn
 from .state import ConvState, eff_model, persist
 
-# context 用到幾成就先壓縮。0.85 是 cc-bot 實測值：再高就有機會在壓縮前先撞爆。
+# context 用到幾成就先壓縮。0.85 是另一個前端的實測值：再高就有機會在壓縮前先撞爆。
 # 只在拿不到權威門檻時才會用到（見 compact_threshold）。
 COMPACT_AT = 0.85
 
@@ -47,7 +47,7 @@ COMPACT_PHASE = "compacting"
 # 各模型的 context 上限。抓保守值即可——這只用來決定何時壓縮，估低頂多多壓一次。
 CTX_LIMIT_DEFAULT = 200_000
 CTX_LIMIT_1M = 1_000_000
-# 高階模型在這些方案下原生就是 1M context（cc-bot context_limit_for 的判定）
+# 高階模型在這些方案下原生就是 1M context（沿用另一個前端判定 context 上限的規則）
 _BIG_CTX_PLANS = frozenset({"max", "team", "enterprise"})
 _BIG_CTX_FAMILIES = ("opus", "fable", "mythos")
 
@@ -55,8 +55,8 @@ _BIG_CTX_FAMILIES = ("opus", "fable", "mythos")
 # 重點摘要…」），模型乖乖輸出一篇摘要文字，但 CLI 的 context **完全沒有被剪**；
 # ctx_tokens 歸零後下一輪又立刻超標，於是每則訊息前都假壓一次（實錄：三分鐘
 # 觸發四次），摘要問答還全數寫進 session 逐字稿被歷史載入原樣顯示。
-# /compact 由 CLI 自己處理：真的剪 context、整輪零 AssistantMessage（cc-bot
-# discord_bot.py:1435 的實測註解），runner 只等 ResultMessage 所以天然相容。
+# /compact 由 CLI 自己處理：真的剪 context、整輪零 AssistantMessage
+# （另一個前端留下的實測註解），runner 只等 ResultMessage 所以天然相容。
 COMPACT_PROMPT = (
     "/compact 壓縮時務必完整保留：本次對話實際完成的改動"
     "（檔案路徑、新增或修改的函式與指令與欄位名稱）、版本號變動、尚未完成的待辦。"
@@ -92,8 +92,8 @@ def _stamp(text: str, src: str = "") -> str:
     模型手上唯一的時間資訊是 CLI system prompt 那句「今天是幾月幾號」，而對話裡
     每一則訊息都沒有時間。它看得到前面說過什麼，卻完全不知道那是十分鐘前還是
     三天前——這條對話又是持續的、跨好幾天的，於是它只能猜，猜出來的就是
-    「我昨天講錯的一件事」，而那其實是同一天稍早。使用者 2026-08-21 回報
-    「他經常會說昨天，但明明只是上一波對話而已」。壓縮過後更嚴重：摘要裡連
+    「我昨天講錯的一件事」，而那其實是同一天稍早——明明只隔了上一波對話，
+    它卻講成昨天。壓縮過後更嚴重：摘要裡連
     日期痕跡都不剩。
 
     加星期是因為 system prompt 只給日期不給星期，模型連今天禮拜幾都不知道，
@@ -170,7 +170,7 @@ def compact_threshold(state: ConvState) -> int:
 def parse_ask(ask_data: dict) -> AskRequest | None:
     """把 AskUserQuestion 的工具輸入轉成 AskRequest。
 
-    一次只處理第一題：手機一問一答的介面收不了多題，多的會被吞掉（cc-bot 的防呆）。
+    一次只處理第一題：手機一問一答的介面收不了多題，多的會被吞掉（沿用另一個前端的防呆）。
     """
     if not isinstance(ask_data, dict):
         return None
@@ -206,7 +206,7 @@ class _QuietFrontend:
     auto-compact 會叫模型把整段對話寫成重點摘要。那一輪的 text.delta 是**維運
     產物、不是助理在跟使用者說話**，先前卻跟正常回覆走同一條路送到畫面上，
     使用者看到的就是「先打出一大堆對話摘要，然後被下一個 turn.start 清掉」——
-    他的原話「顯示一堆對話摘要再收回去」講的就是這個。
+    畫面上等於顯示一堆對話摘要再收回去。
 
     status 仍然放行：壓縮可能跑十幾秒，全靜音會變成畫面卡住不動沒人知道在幹嘛。
     放行時蓋上 phase 旗標——這一輪的思考被擋掉了，手機端的狀態列沒東西可寫就
@@ -238,6 +238,13 @@ _compact_failed: dict[str, float] = {}     # conv → 上次壓縮失敗的 mono
 # 額度用盡時 CLI 給的回復時刻（epoch 秒）。在那之前不要再對這條對話做任何會叫模型
 # 的事（壓縮、續跑），transport 也靠它決定排隊的訊息要等到什麼時候自動重跑。
 _limit_until: dict[str, float] = {}
+
+# wake 回合（助理自己醒來的那一輪）的同一種錯誤，多久內只報一次。
+# 四件背景工作同時跑完時，四個 wake 回合會在同一秒撞到限流，
+# 手機收到四則一模一樣的「用量到上限了」。使用者自己送的訊息不在此列——
+# 那一則出錯一定要告訴他，否則他送出去的話沒有任何回應。
+_WAKE_ERROR_DEDUP_SEC = 60.0
+_last_wake_error: dict[str, tuple[str, float]] = {}   # conv → (錯誤種類, monotonic 時刻)
 
 
 def limit_until(conv: str) -> float | None:
@@ -340,7 +347,10 @@ async def handle_turn(
     out = TurnOutcome()
     started = time.monotonic()
     try:
-        await _maybe_compact(state, frontend, conv)
+        # 助理每天、課程每週換一段新的 session，時機就是這裡：人送了新的一句、這一輪開始前。
+        # 換了就不必再壓縮（新 session 是空的）；沒換照舊看要不要壓（見 engine.rotation）
+        if not await rotation.maybe_rotate(state, frontend):
+            await _maybe_compact(state, frontend, conv)
         # 只有真的使用者訊息蓋時間戳。續跑與重試的提示走別的路徑進來，
         # 那些是同一則訊息的內部往返，蓋上去只會讓歷史多出幾個假的時間點
         await _run_with_recovery(
@@ -389,10 +399,10 @@ async def handle_wake(
         _persist_sid(res, state)
         await _settle(res, state, frontend, conv, out)
     except CCError as e:
-        await _handle_error(e, state, frontend, conv)
+        await _handle_error(e, state, frontend, conv, wake=True)
         return
     except Exception as e:  # noqa: BLE001 — 同 handle_turn：漏網的也要變成事件
-        await _handle_error(wrap(e), state, frontend, conv)
+        await _handle_error(wrap(e), state, frontend, conv, wake=True)
         return
     await _turn_done(frontend, conv, out, started, notify=bool(out.last_markdown))
 
@@ -405,7 +415,7 @@ async def _turn_done(
 
     先前推播綁在 `reply.final` 上，而那個事件**每一輪都會發一次**——自動續跑
     每續一輪一則、壓縮核對再一則。使用者收到通知點進來，助理還在跑下一輪，
-    畫面上是思考中。他的原話：「通知這個動作應該要在最後才對」。
+    畫面上是思考中。通知這個動作應該要落在最後一則才對。
 
     `pending_ask` 那種收工照樣發，讓「這則訊息處理完了」這件事只有一個訊號源；
     要不要據此推播、推什麼文案由手機端決定——**這是停在提問上時唯一的推播來源**，
@@ -564,7 +574,7 @@ async def _run_once_with_empty_retry(
 
     # 兜底素材自己保管：**不可**每輪覆寫。
     # 關思考的那一輪拿不到思考文字，會把前面有內容的那份洗成空字串，
-    # 第三層因此永遠讀到空值、形同死碼（cc-bot 踩過，由另一個 session 抓出來）。
+    # 第三層因此永遠讀到空值、形同死碼（另一個前端踩過，由另一個 session 抓出來）。
     best_think = (res.all_think or "").strip()
     # 壓縮旗標同樣不可被重試輪覆寫：被切斷的是第一輪，重試輪沒被切不代表沒發生過
     saw_compact = res.compacted
@@ -657,14 +667,21 @@ async def _auto_continue(
 
 def _persist_sid(res: TurnResult, state: ConvState) -> None:
     if res.session_id:
+        if res.session_id != state.session_id:
+            state.session_started = time.time()     # 新的一段 session（見 engine.rotation）
         state.session_id = res.session_id
         persist(state)
 
 
 async def _handle_error(
     err: CCError, state: ConvState, frontend: Frontend, conv: str,
+    wake: bool = False,
 ) -> None:
-    """依錯誤類型決定善後動作，再把結果告訴使用者。"""
+    """依錯誤類型決定善後動作，再把結果告訴使用者。
+
+    [wake]＝這是助理自己醒來的那一輪（沒有人在等它回話）。這種回合的同一種錯誤
+    一分鐘內只報第一次，見 `_WAKE_ERROR_DEDUP_SEC`。
+    """
     # 錯誤一定要進診斷檔。先前只 emit 不記，919 個回合裡查不到任何一筆錯誤紀錄，
     # 事後對「那時到底怎麼了」只能猜（見 diag.py 的說明）。
     diag.record(
@@ -681,6 +698,18 @@ async def _handle_error(
         await client_pool.drop(conv)
     if err.kind == "RATE_LIMIT" and err.resets_at:
         _limit_until[conv] = float(err.resets_at)
+    if wake:
+        now = time.monotonic()
+        prev = _last_wake_error.get(conv)
+        _last_wake_error[conv] = (err.kind, now)
+        if prev is not None and prev[0] == err.kind and now - prev[1] < _WAKE_ERROR_DEDUP_SEC:
+            # 同一種錯誤剛報過：這一輪安靜收尾。**不能什麼都不發**——手機的忙碌旗標
+            # 只認 turn.done／error，不收尾的話狀態列與停止鍵會一直掛著。
+            await frontend.emit(make_event(
+                conv, "-", "turn.done", notify=False, used_tool=False,
+                markdown="", pending_ask=False, elapsed_ms=0,
+            ))
+            return
     payload: dict[str, Any] = {
         "kind": err.kind,
         "detail": err.user_msg,

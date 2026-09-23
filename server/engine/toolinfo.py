@@ -1,6 +1,6 @@
 """工具呼叫的參數萃取。
 
-cc-bot 的 _fmt_tool 直接組 Discord Markdown 字串；這裡改成回 dict，
+聊天平台的前端直接把工具呼叫組成 Discord Markdown 字串；這裡改成回 dict，
 由手機端決定怎麼畫。兩個實質差異：
   1. `raw` **不截斷**——Discord 有 2000 字上限才要截，手機沒有。而核對指令原文
      正是安全防線本身，截尾就是把破壞性尾段推出視野。
@@ -43,7 +43,7 @@ def _summarize(name: str, inp: dict) -> str:
 
 
 def _nlines(s: Any) -> int:
-    """字串行數（空字串算 0）。增刪行數以參數行數近似，與 cc-bot 同法。"""
+    """字串行數（空字串算 0）。增刪行數以參數行數近似，與另一個前端同法。"""
     return (str(s).count("\n") + 1) if s else 0
 
 
@@ -52,7 +52,7 @@ def tool_info(name: str, inp: dict) -> dict[str, Any]:
 
     `dangerous` 用與確認按鈕同一套 DESTRUCTIVE_RE 判準，且**不受確認總開關影響**——
     開關關掉時仍要在 UI 上標出危險，只是不擋。
-    先前 cc-bot 把 Bash/PowerShell/Write/Edit 一律掛警示，結果每行都警示＝沒有警示。
+    先前另一個前端把 Bash/PowerShell/Write/Edit 一律掛警示，結果每行都警示＝沒有警示。
 
     `kind` 是前端統計摺疊用的分類（讀檔／改檔／指令／上網），
     `added`/`removed` 是增刪行數近似（Write＝全新增、Edit＝new 減 old）。
@@ -83,6 +83,6 @@ def tool_info(name: str, inp: dict) -> dict[str, Any]:
         "kind": kind,
         "added": added,
         "removed": removed,
-        # 新增檔案顯示檔名（cc-bot 統計行的「新增 spec_lookup.py」）
+        # 新增檔案顯示檔名（統計行上的「新增 foo.py」）
         "file": Path(str(inp.get("file_path", ""))).name if name == "Write" else "",
     }

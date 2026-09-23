@@ -1,6 +1,6 @@
 """官方模型清單：從 CLI 拿、快取、給設定頁與驗證用。
 
-模型選項要跟著官方走（使用者 2026-09-02 明確要求）。CLI 的 initialize 回應本來就帶
+模型選項要跟著官方走，不在這邊自己維護一份。CLI 的 initialize 回應本來就帶
 `models`（實測 `_diag/server_info_probe.py`）：
 
     {"value": "default", "resolvedModel": "claude-opus-5[1m]",
@@ -72,8 +72,8 @@ class ModelInfo:
 _FALLBACK: tuple[ModelInfo, ...] = (
     ModelInfo("default", "", "Default (recommended)", "跟著 Claude Code 的預設走"),
     ModelInfo("opus", "", "Opus", ""),
-    # Fable 沒有短別名，只能寫這個值（2026-09-03 官方清單就是這個字串）。使用者
-    # 最常切的正是它，後備清單少了它比多一個會過期的 id 更糟——2026-09-03 重啟後
+    # Fable 沒有短別名，只能寫這個值（官方清單就是這個字串）。它是可選的主力
+    # 模型之一，後備清單少了它比多一個會過期的 id 更糟——重啟後
     # 第一次連線前手機面板就是少了 Fable
     ModelInfo("claude-fable-5[1m]", "", "Fable", ""),
     ModelInfo("sonnet", "", "Sonnet", ""),

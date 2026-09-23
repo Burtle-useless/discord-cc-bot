@@ -1,6 +1,6 @@
 """對話搜尋：關鍵字掃 butler 自己的 session 逐字稿。
 
-對照 cc-bot 的 /search，但先做關鍵字版。語意搜尋（e5 向量）要多載一個
+對照另一個前端的 /search，但先做關鍵字版。語意搜尋（e5 向量）要多載一個
 1024 維模型＋建索引，等關鍵字版證明不夠用再說。
 """
 from __future__ import annotations

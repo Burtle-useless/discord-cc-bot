@@ -36,7 +36,8 @@ from dataclasses import dataclass
 import config
 
 from . import agenda_tools, file_tools, kanban_tools, location
-from .options import SYSTEM_APPEND, WORK_APPEND
+from .history import _session_file
+from .options import SYSTEM_APPEND, WORK_APPEND, course_append
 from .state import ConvState
 
 
@@ -54,6 +55,42 @@ class Profile:
     append: str                                # system_prompt append 全文（無換行）
     servers: Callable[[ConvState], dict]       # 這條對話要掛的 MCP servers
     src_default: str = "手機"                   # 這個前端預設的來源名（給時間戳用）
+    # 有些 profile 的 append 要看 conv_id 才組得出來——課程對話是一門課一條，
+    # 課名就在 conv_id 裡。給了這個就用它，`append` 只剩註冊時的佔位。
+    append_fn: Callable[[ConvState], str] | None = None
+    # 固定模型／思考程度：有值就壓過對話覆寫與帳號預設（見 state.eff_model）。
+    # 用在「這種對話就該用這個模型」的場合——那種對話通常沒有設定入口，
+    # 不固定住的話帳號預設一改它就跟著漂。
+    model: str | None = None
+    effort: str | None = None
+    # 多久換一段新的 session："daily"／"weekly"／None（永遠不換）。見 engine.rotation。
+    rotate: str | None = None
+
+    def append_text(self, state: ConvState) -> str:
+        """這條對話實際要疊上去的 append。動態的優先，沒有就回常數那份；
+        換過 session 的再接一句「上一段逐字稿在哪」。"""
+        base = self.append_fn(state) if self.append_fn else self.append
+        if self.rotate and state.past_sessions:
+            base += _prev_session_note(self.rotate, state.past_sessions[-1])
+        return base
+
+
+def _prev_session_note(kind: str, sid: str) -> str:
+    """換過 session 的對話要知道上一段在哪。
+
+    輪替之後模型手上只有這一段的脈絡。使用者提到前一段講過的事時，與其瞎猜或回頭問，
+    不如自己去翻——但只准搜、不准整份讀：上一段可能幾百 MB，整份讀進來就把省下的
+    token 全吐回去了。路徑用正斜線，理由見 options 裡帶路徑進 prompt 的說明。
+    """
+    jf = _session_file(sid)
+    if jf is None:
+        return ""
+    period = "每天" if kind == "daily" else "每週"
+    return (
+        f"這段對話{period}會換一段新的脈絡，你現在在新的這一段，之前聊過的不在你的記憶裡。"
+        f"上一段的逐字稿在 {jf.as_posix()}，是 JSONL，一行一筆。"
+        "他提到之前講過、你卻不記得的事時，用 Grep 搜關鍵字或只讀檔尾去找，不要整份讀進來。"
+    )
 
 
 def full_servers(state: ConvState) -> dict:
@@ -80,10 +117,34 @@ def files_only(state: ConvState) -> dict:
 
 
 # 助理：全套。只給 `config.PRIMARY_CONV` 那一條，精確比對（見 resolve）。
-PRIMARY = Profile(name="primary", append=SYSTEM_APPEND, servers=full_servers)
+# 每天換一段新的 session：這條對話一路接下去不會結束，理由見 engine.rotation。
+PRIMARY = Profile(name="primary", append=SYSTEM_APPEND, servers=full_servers, rotate="daily")
 
 # 預設：工作精簡版。工作分頁開幾條就有幾條，所以它是「剩下的全部」。
 DEFAULT = Profile(name="work", append=WORK_APPEND, servers=files_only)
+
+# ── 課程對話 ────────────────────────────────────────────────────────────────
+#
+# 一門課一條對話，conv_id 是 `course:<資料夾名>`。課名藏在 id 裡，所以 append
+# 得動態組（`append_fn`）——每門課的資料夾路徑不一樣，模型要知道自己該往哪寫。
+#
+# 只掛傳檔工具：課程對話不碰行事曆也不碰看板，它要的是讀寫那門課的資料夾，
+# 而那件事 Claude Code 自己的檔案工具就做得到。
+COURSE_PREFIX = "course:"
+
+
+def course_name(conv_id: str) -> str:
+    """`course:微積分` → `微積分`。不是課程對話就回空字串。"""
+    return conv_id[len(COURSE_PREFIX):] if conv_id.startswith(COURSE_PREFIX) else ""
+
+
+COURSE = Profile(
+    name="course", append="", servers=files_only,
+    append_fn=lambda st: course_append(course_name(st.conv_id)),
+    # 每週換一段新的 session。課程的理解進度與提問紀錄在課程資料夾的 md 檔裡，
+    # 不靠 session 記，換掉不會丟東西
+    rotate="weekly",
+)
 
 # 前綴 → profile。`""` 永遠在（模組載入時放進去），所以 resolve 一定找得到東西。
 _by_prefix: dict[str, Profile] = {}
@@ -116,3 +177,7 @@ def resolve(conv_id: str) -> Profile:
 
 
 register("", DEFAULT)
+# 課程是選配的：沒開就不註冊，那些 conv_id 會落到預設 profile（等於一條普通
+# 的工作對話）。註冊了才會拿到那份「你是某門課的助教」的 system prompt。
+if config.COURSES_ENABLED:
+    register(COURSE_PREFIX, COURSE)

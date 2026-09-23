@@ -1,9 +1,10 @@
 """一次性的輕量 meta 查詢（標題生成等），不留 session 檔。
 
-對照 cc-bot 的 _ask_haiku / _purge_title_shell / _generate_title。
+對照另一個前端的輕量問答與標題生成那組函式。
 """
 from __future__ import annotations
 
+import asyncio
 import re
 from pathlib import Path
 
@@ -19,7 +20,7 @@ TITLE_PROMPT = (
     "只輸出標題本身，不要引號不要句號。對話開頭："
 )
 
-# 錯誤樣態不准當標題——cc-bot 曾把「Failed to authenticate. API Error: 401」
+# 錯誤樣態不准當標題——另一個前端曾把「Failed to authenticate. API Error: 401」
 # 存成標題還改了頻道名，之後每回合狀態列都掛著它，看起來像持續壞掉。
 _ERRORISH = re.compile(r"(?i)failed to authenticate|api error|oauth|\b401\b|\b429\b|\b529\b")
 
@@ -68,31 +69,57 @@ async def ask_once(prompt: str, model: str | None = None) -> str:
     模型進來。`no-session-persistence` 讓它不寫逐字稿，否則每取一次標題就在
     `~/.claude/projects` 多一個空殼 session，`/sessions` 清單會被灌爆。
     """
-    opts = ClaudeAgentOptions(
+    out, meta_sid = "", None
+
+    async def _run() -> None:
+        nonlocal out, meta_sid
+        async with ClaudeSDKClient(one_shot_options(model)) as c:
+            await c.query(prompt)
+            async for msg in iter_messages(c):
+                if isinstance(msg, ResultMessage):
+                    out = msg.result or ""
+                    meta_sid = msg.session_id
+                    break
+
+    # 一次性的查詢不該卡住呼叫端：生標題、交接稿都有人在等（逾時由呼叫端當失敗處理）
+    await asyncio.wait_for(_run(), timeout=ONE_SHOT_TIMEOUT_SEC)
+    _purge_title_shell(meta_sid)
+    return out.strip()
+
+
+# 一次性查詢的總時限。交接稿要讀整段對話，Opus 寫一兩千字可能要一分多鐘。
+ONE_SHOT_TIMEOUT_SEC = 180.0
+
+
+def one_shot_options(model: str | None) -> ClaudeAgentOptions:
+    """一次性查詢的 SDK 選項：**沒有工具、只回一輪、不載入任何使用者設定與 MCP**。
+
+    這些查詢吃的是對話原文（生標題）或整段逐字稿（交接稿），而那些內容可能包含助理
+    讀過的網頁與檔案——被注入的指令就在裡面。開著
+    bypassPermissions、工具全開、不限輪數，等於讓一段外來文字有機會在這台電腦上跑
+    Bash。它們要的只是一段文字，不需要任何工具。
+
+    順帶的好處：先前每生一次標題就帶起使用者設定裡的整串 MCP 伺服器
+    （裝了幾個就帶幾個），現在只剩 CLI 本身。
+    """
+    return ClaudeAgentOptions(
         cwd=str(config.DEFAULT_CWD),
         cli_path=config.CLAUDE_CLI,
         model=model,
-        permission_mode="bypassPermissions",
+        tools=[],                       # 內建工具全關
+        max_turns=1,
+        strict_mcp_config=True,         # 不載入任何 MCP 設定（這裡也沒給 mcp_servers）
+        setting_sources=[],             # 不讀使用者／專案設定（hooks、CLAUDE.md、plugins）
         extra_args={"no-session-persistence": None},
     )
-    out, meta_sid = "", None
-    async with ClaudeSDKClient(opts) as c:
-        await c.query(prompt)
-        async for msg in iter_messages(c):
-            if isinstance(msg, ResultMessage):
-                out = msg.result or ""
-                meta_sid = msg.session_id
-                break
-    _purge_title_shell(meta_sid)
-    return out.strip()
 
 
 async def generate_title(convo_text: str) -> str | None:
     """由對話開頭內容生成短標題。失敗或長得像錯誤訊息就回 None。
 
     吃的是「一段對話文字」不是「第一則訊息」：使用者的開場常常是「幫我看一下」
-    這種沒有資訊量的話，只讀它就只能生出同等級的標題。3000 字對齊 cc-bot 的
-    _read_session_text 預設值——夠涵蓋前幾輪往返，又不會讓 Haiku 讀太久。
+    這種沒有資訊量的話，只讀它就只能生出同等級的標題。3000 字對齊另一個前端
+    讀 session 內容的預設值——夠涵蓋前幾輪往返，又不會讓 Haiku 讀太久。
     """
     try:
         raw = await ask_haiku(TITLE_PROMPT + convo_text[:3000])

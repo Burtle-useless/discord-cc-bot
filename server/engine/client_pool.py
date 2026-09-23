@@ -27,7 +27,7 @@ from .state import ConvState, eff_effort, eff_model
 log = logging.getLogger(__name__)
 
 _clients: dict[str, Mailbox] = {}
-_used: dict[str, float] = {}        # 最後使用時間（閒置回收與 LRU 判斷）
+_used: dict[str, float] = {}        # 最後取用時刻（monotonic），跟 box.last_activity 取較晚的那個
 _sigs: dict[str, tuple] = {}        # 設定指紋（變了就重建）
 _locks: dict[str, asyncio.Lock] = {}   # 每個對話一把，見 [_lock_for]
 
@@ -85,6 +85,32 @@ async def drop(conv_id: str) -> None:
         log.info("回收 %s 的連線，順帶結掉 %d 件背景工作", conv_id, gone)
 
 
+def is_busy(conv_id: str, box: Mailbox) -> bool:
+    """這條連線現在能不能關：有回合在讀、有 wake 票待領、或有背景工作在跑，就不能。
+
+    閒置回收與 LRU 淘汰若只看「上次取用的時間」就會出事：取用只發生在回合
+    開頭——一個跑超過 15 分鐘的回合、或回合結束後還在跑的背景工作，都會被自己的回收器
+    殺掉（連同 CLI 裡的背景工作），第 4 條對話建連線時也會把正在跑的那條踢掉。
+    """
+    return box.busy() or bool(bg_notify.active(conv_id))
+
+
+def last_seen(conv_id: str, box: Mailbox) -> float:
+    """最後有動靜的時刻（monotonic）：取用與收到訊息，取較晚的那個。"""
+    return max(_used.get(conv_id, 0.0), box.last_activity)
+
+
+def pick_victim() -> str | None:
+    """池子滿了要淘汰誰：**閒著的**裡面最久沒動靜的那個；全都在忙就回 None。
+
+    全都在忙時寧可暫時超過上限（多吃一點記憶體），也不殺掉正在工作的連線。
+    """
+    idle = [cid for cid, box in _clients.items() if not is_busy(cid, box)]
+    if not idle:
+        return None
+    return min(idle, key=lambda cid: last_seen(cid, _clients[cid]))
+
+
 def peek(conv_id: str) -> Mailbox | None:
     """取得該對話**現有**的收發中樞，沒有就回 None。絕不建立新的。
 
@@ -113,7 +139,7 @@ async def acquire(state: ConvState, frontend: Frontend) -> Mailbox:
             await drop(cid)
             box = None
         if box is not None and _sigs.get(cid) == client_sig(state):
-            _used[cid] = time.time()
+            _used[cid] = time.monotonic()
             # 回合外事件要靠它送出去，每次都換成最新的那個（見 Mailbox.frontend）
             box.frontend = frontend
             return box
@@ -122,15 +148,21 @@ async def acquire(state: ConvState, frontend: Frontend) -> Mailbox:
             # 先沿用舊設定把這回合跑完，背景工作結束後下一次 acquire 自然重建。
             log.info("對話 %s 設定已變，但有 %d 件背景工作在跑，先沿用舊連線",
                      cid, len(bg_notify.active(cid)))
-            _used[cid] = time.time()
+            _used[cid] = time.monotonic()
             box.frontend = frontend
             return box
         if box is not None:                    # 設定已變 → 丟棄舊的，用新設定重建
             await drop(cid)
-        # 進程池上限：滿了先淘汰最久未用的（LRU）。session 不受影響，
+        # 進程池上限：滿了先淘汰閒著的裡面最久沒動靜的（LRU）。session 不受影響，
         # 被淘汰的對話下次有訊息時自動 resume 接回，只是多付一次進程啟動時間。
-        while len(_clients) >= config.MAX_CLIENTS and _used:
-            await drop(min(_used, key=lambda k: _used[k]))
+        # 在忙的一律不淘汰（見 is_busy）；全都在忙就暫時超過上限。
+        while len(_clients) >= config.MAX_CLIENTS:
+            victim = pick_victim()
+            if victim is None:
+                log.warning("連線池已滿（%d 條）且全都在忙，暫時超過上限建第 %d 條",
+                            len(_clients), len(_clients) + 1)
+                break
+            await drop(victim)
         options = build_options(state, frontend)
         if state.session_id:
             if session_exists(state.session_id):
@@ -155,17 +187,39 @@ async def acquire(state: ConvState, frontend: Frontend) -> Mailbox:
         box.start()
         _clients[cid] = box
         _sigs[cid] = client_sig(state)
-        _used[cid] = time.time()
+        _used[cid] = time.monotonic()
         return box
 
 
-async def reaper() -> None:
-    """背景工作：定期回收閒置過久的 client，釋放記憶體與 VRAM。"""
-    while True:
-        await asyncio.sleep(config.CLIENT_IDLE_TIMEOUT)
-        now = time.time()
-        for cid in [k for k, t0 in _used.items() if now - t0 > config.CLIENT_IDLE_TIMEOUT]:
+# 閒置回收多久巡一次。先前巡的間隔等於閒置門檻（900 秒），一條連線最久要閒 30 分鐘才被收。
+REAP_INTERVAL_SEC = 60.0
+
+
+async def reap_idle(now: float | None = None) -> list[str]:
+    """收掉閒置超過 CLIENT_IDLE_TIMEOUT、而且不在忙的連線，回傳收了哪幾條。"""
+    now = time.monotonic() if now is None else now
+    gone: list[str] = []
+    for cid, box in list(_clients.items()):
+        if is_busy(cid, box):
+            continue
+        if now - last_seen(cid, box) > config.CLIENT_IDLE_TIMEOUT:
             await drop(cid)
+            gone.append(cid)
+    return gone
+
+
+async def reaper() -> None:
+    """背景工作：定期回收閒置過久的 client，釋放記憶體與 VRAM。
+
+    單一次巡邏出錯只記一筆、下一輪照巡——回收器本身死掉是看不見的故障，
+    閒置的 CLI 會就這樣一直累積下去。
+    """
+    while True:
+        await asyncio.sleep(REAP_INTERVAL_SEC)
+        try:
+            await reap_idle()
+        except Exception:  # noqa: BLE001
+            log.exception("閒置回收這一輪出錯")
 
 
 async def shutdown() -> None:

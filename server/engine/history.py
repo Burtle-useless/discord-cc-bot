@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Final
 
 import config
+from util import is_session_id
 
 from .fold import ask_payload, clean_reply
 from .state import _load_map
@@ -23,8 +24,8 @@ from .toolinfo import tool_info
 # 這些開頭代表「這一則不是人打的」。CC 的 user turn 是個大雜燴：除了真的使用者
 # 訊息，還混著補跑提示、斜線指令條目、背景任務通知、讀圖工具回填的尺寸註記……
 # 全部長得跟使用者自己說的話一模一樣，重建歷史時就原樣畫成一顆訊息氣泡。
-# 2026-08-14 使用者回報「這些訊息不應該出現在使用者的介面」，截圖裡是整片
-# <task-notification> 的英文 XML 卡在他自己的兩句話中間。
+# 這些訊息不應該出現在使用者的介面：整片
+# <task-notification> 的英文 XML 會卡在使用者自己的兩句話中間。
 #
 # 判準用開頭而不是包含：使用者本人完全可能在對話裡提到 /compact 或 task-notification。
 # 實測這些注入各自獨佔一則 record，不會跟使用者的話混在同一則，所以整則丟掉是安全的。
@@ -72,6 +73,9 @@ _STAMP_RE: Final[re.Pattern[str]] = re.compile(
 
 
 def _session_file(session_id: str) -> Path | None:
+    # 不是 UUID 的樣子就不拿去 glob：`*` 會對到任意一份 session（見 util.is_session_id）
+    if not is_session_id(session_id):
+        return None
     for jf in config.claude_projects_dir().glob(f"*/{session_id}.jsonl"):
         return jf
     return None
@@ -130,7 +134,7 @@ def _thinking_of(content: Any) -> str:
 # 兩個都是體積護欄。`tool_info` 的 raw 是**刻意不截斷**的完整指令原文，那是
 # 「核對它到底在跑什麼」的防線（見 toolinfo 模組說明）——但那條防線的作用在
 # 指令跑之前，事後回看已經沒有攔截可言，體積卻照樣要付。歷史一次回 60 則，
-# 使用者 2026-08-23 抱怨過切對話載入慢（「超級無敵慢　超級煩」），剛修好，
+# 切對話時載入很慢，剛修好，
 # 不能為了軌跡再撐回去。
 _TOOLS_MAX: Final[int] = 40
 _TOOL_RAW_MAX: Final[int] = 2000
@@ -199,7 +203,7 @@ def _at_ms(rec: dict) -> int | None:
 # 逐字稿會長到很大——助理那條與這條各自 220MB——而畫面只要最後 60 則。先前是
 # 從頭讀到尾、解析每一行、最後才切 `out[-limit:]`，於是切一次對話要 1~2.4 秒
 # （量測：220MB→2.4s、8.7MB→125ms、0.6MB→14ms，跟檔案大小成正比）。
-# 使用者 2026-08-23 的原話是「載入速度超級無敵慢　超級煩」。
+# 切一次對話就得乾等，慢到有感。
 #
 # 4MB 通常就裝得下 60 則對話；裝不下的（工具軌跡與圖片佔掉大半那種）再往前
 # 抓一段。最後一格是 None＝整份都讀，行為退回原本那樣，答案永遠不會比以前差。
@@ -221,11 +225,116 @@ def _tail_lines(jf: Path, nbytes: int | None) -> tuple[list[str], bool]:
     size = jf.stat().st_size
     if nbytes is None or size <= nbytes:
         with jf.open(encoding="utf-8", errors="replace") as f:
-            return f.read().splitlines(), True
+            return _jsonl_lines(f.read()), True
     with jf.open("rb") as f:
         f.seek(size - nbytes)
         raw = f.read()
-    return raw.decode("utf-8", errors="replace").splitlines()[1:], False
+    return _jsonl_lines(raw.decode("utf-8", errors="replace"))[1:], False
+
+
+def _jsonl_lines(text: str) -> list[str]:
+    """把 JSONL 切成行。**只能用 `\\n` 切，不能用 `str.splitlines()`。**
+
+    splitlines 也把 U+2028／U+2029／U+0085 當換行，而 CC 寫逐字稿時這幾個字元
+    不會被跳脫（它們在 JSON 字串裡是合法字元）。一則訊息裡只要有一個，整筆紀錄
+    就被切成兩段、兩段都解析失敗，那則訊息從歷史裡消失。
+    """
+    return [ln.rstrip("\r") for ln in text.split("\n") if ln.strip()]
+
+
+def session_started_at(session_id: str) -> float | None:
+    """這段 session 的第一筆紀錄是什麼時候（epoch 秒）；找不到檔或讀不出時間回 None。
+
+    給沒記過開始時間的舊 session 用（engine.rotation）：只讀檔頭幾行，
+    不會為了一個時間把幾百 MB 的逐字稿整份讀進來。
+    """
+    jf = _session_file(session_id)
+    if jf is None:
+        return None
+    try:
+        with jf.open(encoding="utf-8", errors="replace") as f:
+            for i, line in enumerate(f):
+                if i >= 200:
+                    break
+                try:
+                    ms = _at_ms(json.loads(line))
+                except ValueError:
+                    continue
+                if ms:
+                    return ms / 1000
+    except OSError:
+        return None
+    return None
+
+
+def _session_chain(conv_id: str) -> list[Path]:
+    """這條對話看得到的逐字稿，新到舊：目前這段，接著是之前輪替掉的那幾段。
+
+    助理每天、課程每週換一段新的 session（見 engine.rotation）。畫面上的對話不能跟著
+    每天歸零——往上捲要接著看到昨天，所以讀歷史時目前這段讀完就往前一段接。
+    """
+    rec = _load_map().get(conv_id) or {}
+    sids = [rec.get("session_id")] + list(reversed(rec.get("past_sessions") or []))
+    out: list[Path] = []
+    for sid in sids:
+        if isinstance(sid, str) and sid:
+            jf = _session_file(sid)
+            if jf is not None:
+                out.append(jf)
+    return out
+
+
+# 換 session 的那條分隔線上的字（歷史與即時事件共用，見 engine.rotation）
+ROTATE_NOTES: dict[str, str] = {
+    "daily": "新的一天，換了一段新的 session",
+    "weekly": "新的一週，換了一段新的 session",
+}
+
+
+def _divider(conv_id: str, at_ms: int) -> dict:
+    """兩段 session 之間的那一列。App 畫成分隔線；舊版 App 當成一行灰字（system）。
+
+    `at_ms` 給**較舊那段的最後一則**的時間，不是 +1：App 往前翻頁拿畫面上最舊那則的
+    時間當游標，分隔線一定排在那段最後一則之後，所以游標落不到它身上；
+    而較新那一頁若剛好從那一則切開，下一頁的「比游標早」會把分隔線一起排除，不會畫兩次。
+    """
+    from .profiles import resolve     # profiles 在模組層 import 這裡，只能函式內 import
+    note = ROTATE_NOTES.get(resolve(conv_id).rotate or "", "換了一段新的 session")
+    return {"role": "system", "kind": "rotate", "text": note, "at_ms": at_ms}
+
+
+def _load_chain(conv_id: str, limit: int, before_ms: int | None) -> tuple[list[dict], bool]:
+    """跨 session 取最後 [limit] 則（舊到新）與「還有沒有更早的」。
+
+    較舊那段的**最後一則**有進這一頁，就在它後面補一條分隔線（[_divider]）：
+    往上捲的人要看得出來從哪裡開始，模型不記得了。
+    """
+    files = _session_chain(conv_id)
+    acc: list[dict] = []
+    for i, jf in enumerate(files):
+        got, more = _load_tail(jf, limit - len(acc), before_ms)
+        if i > 0 and got:
+            end = int(got[-1].get("at_ms") or 0)
+            whole_tail = before_ms is None or _segment_end_ms(jf) < before_ms
+            if whole_tail and end:
+                got = got + [_divider(conv_id, end)]
+        acc = got + acc
+        if len(acc) >= limit:
+            cut = len(acc) - limit
+            # 分隔線不能是一頁的第一列：App 拿第一列的時間當翻頁游標，而線的時間就是
+            # 它前面那則的時間——那則會被下一頁的「比游標早」排除掉，永遠看不到。
+            # 把前面那則一起帶進這一頁（多一列無妨）
+            if cut > 0 and acc[cut].get("kind") == "rotate":
+                cut -= 1
+            # 分隔線會讓 acc 比 limit 多，切掉的那幾則要靠下一頁補，所以切了就是「還有」
+            return acc[cut:], more or i < len(files) - 1 or cut > 0
+    return acc, False
+
+
+def _segment_end_ms(jf: Path) -> int:
+    """一段逐字稿最後一則的時間（epoch 毫秒）；讀不出來回 0。"""
+    last, _ = _load_tail(jf, 1, None)
+    return int(last[-1].get("at_ms") or 0) if last else 0
 
 
 def load_history(conv_id: str, limit: int = 60, head: int = 0) -> list[dict]:
@@ -244,8 +353,8 @@ def load_history(conv_id: str, limit: int = 60, head: int = 0) -> list[dict]:
 
     這兩樣原本是一起丟掉的，理由寫成「那是過程，事後回看價值低」。實際後果是
     它們只在「當下那一次串流」看得到：服務一重啟、App 一重裝、對話一切走再切
-    回來，整條對話就只剩下光禿禿的問與答。2026-08-17 使用者回報思考不見，
-    當時只把思考撿回來，工具軌跡留在原地；2026-08-25 他回報了另一半。
+    回來，整條對話就只剩下光禿禿的問與答。先是思考不見，
+    當時只把思考撿回來、工具軌跡留在原地；後來才補上另一半。
 
     「回看價值低」是錯的判斷。助理做完一件事之後，人要回頭確認的正是它到底動了
     哪些檔案、跑了什麼指令——那是**唯一**的紀錄。而且它跟思考一樣在 App 上是
@@ -255,24 +364,23 @@ def load_history(conv_id: str, limit: int = 60, head: int = 0) -> list[dict]:
     各則、而最終回覆只在最後一則。所以兩者都是**累積**到下一則有文字的訊息上，
     還原出來的形狀才跟即時串流時看到的一樣：一段回覆配一整包該回合的過程。
     """
-    rec = _load_map().get(conv_id) or {}
-    sid = rec.get("session_id")
-    if not sid:
-        return []
-    jf = _session_file(sid)
-    if jf is None:
-        return []
-
     if head:
-        # 取開頭那幾則（給標題用）：從檔頭串流讀，湊滿就停，
+        # 取開頭那幾則（給標題用）：只看目前這段 session，從檔頭串流讀，湊滿就停，
         # 後面那幾百 MB 連碰都不必碰
+        rec = _load_map().get(conv_id) or {}
+        sid = rec.get("session_id")
+        jf = _session_file(sid) if sid else None
+        if jf is None:
+            return []
         try:
             with jf.open(encoding="utf-8", errors="replace") as f:
                 return _drop_answered_asks(_parse_lines(f, head))
         except OSError:
             return []
 
-    msgs, _ = _load_tail(jf, limit, None)
+    # 最後 N 則：跨 session 讀（助理每天、課程每週換新 session，畫面不能跟著歸零）。
+    # 剛輪替完、新 session 還沒建起來時目前的 id 是空的，照樣從上一段讀
+    msgs, _ = _load_chain(conv_id, limit, None)
     return msgs
 
 
@@ -282,14 +390,7 @@ def load_history_before(conv_id: str, before_ms: int, limit: int = 60) -> tuple[
     snapshot 只帶最後 60 則，長對話往上捲到頂就得從這裡補。判準用時間而不是
     序號，因為逐字稿裡沒有可靠的序號可用，而 at_ms 本來就是 App 排卡片用的軸。
     """
-    rec = _load_map().get(conv_id) or {}
-    sid = rec.get("session_id")
-    if not sid:
-        return [], False
-    jf = _session_file(sid)
-    if jf is None:
-        return [], False
-    return _load_tail(jf, limit, before_ms)
+    return _load_chain(conv_id, limit, before_ms)
 
 
 def _load_tail(jf: Path, limit: int, before_ms: int | None) -> tuple[list[dict], bool]:
@@ -336,9 +437,9 @@ def _parse_lines(lines: Iterable[str], head: int) -> list[dict]:
         if r.get("isCompactSummary"):
             continue
         # CLI 自己標的「這則不是人打的」。載入 skill 時整份 SKILL.md 會以
-        # user turn 的形狀塞進來，逐字稿裡就是一大段英文 prompt——2026-08-26
-        # 使用者在對話裡看到的正是這個（載入的那份 skill 全文，
-        # 頂著「你」的標籤畫成他自己說的話）。
+        # user turn 的形狀塞進來，逐字稿裡就是一大段英文 prompt——
+        # 對話裡看到的正是這個（載入的那份 skill 全文，
+        # 頂著「你」的標籤畫成使用者自己說的話）。
         #
         # **這條比底下的前綴清單可靠**：它是結構欄位不是字串比對。兩條 session
         # 逐字稿實測，407 則 isMeta 沒有一則帶時間戳（`_STAMP_RE`，那是 butler

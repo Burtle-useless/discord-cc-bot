@@ -1,8 +1,8 @@
 """一個回合的訊息迴圈。
 
-與 cc-bot 的 run_claude 對照，這裡做了一件大事：**把渲染整包拿掉**。
-原版為了塞進 Discord 單則 2000 字上限而生的 _animate／_roll_message／
-_status_block／_append_trace_line 全部不存在（約 100 行最難維護的程式碼消失），
+與聊天平台前端的回合迴圈對照，這裡做了一件大事：**把渲染整包拿掉**。
+原版為了塞進 Discord 單則 2000 字上限而生的動畫更新、翻頁、狀態列組字串、
+軌跡行追加全部不存在（約 100 行最難維護的程式碼消失），
 改成往 frontend 發語意事件，由手機端決定怎麼畫。
 
 控制流本身則逐條保留——那些是踩過坑換來的。
@@ -57,7 +57,7 @@ def _keep_sid(sid: str | None, state: ConvState) -> None:
     自然也不會有它，使用者看到的是「紀錄整條消失」。
 
     逐字稿其實一直好端端躺在 `~/.claude/projects` 底下，丟的只是「哪條對話
-    對到哪個 session」這個對應。使用者 2026-08-23 按了重新啟動，一條正在讀
+    對到哪個 session」這個對應。按一次重新啟動，一條正在讀
     PDF 的對話跑了七分鐘、8.8MB 的內容就是這樣不見的。
 
     第一則 `AssistantMessage` 就帶著 session_id，通常在送出後幾秒內到——
@@ -66,6 +66,9 @@ def _keep_sid(sid: str | None, state: ConvState) -> None:
     if not sid or state.session_id == sid:
         return
     state.session_id = sid
+    # 換成新的一段 session（第一次開、輪替、續接失敗改開新的）：記下開始時間，
+    # 助理每天／課程每週換新 session 靠它判斷（見 engine.rotation）
+    state.session_started = time.time()
     persist(state)
 
 
@@ -73,9 +76,9 @@ def _keep_sid(sid: str | None, state: ConvState) -> None:
 class TurnResult:
     """一個回合的產出。
 
-    cc-bot 把這些散在四個 by-channel 全域 dict（_last_turn_used_tool / _done /
-    _wait / _think），呼叫端再去讀。這裡收成一個回傳值——回合管線需要它們做
-    續跑與兜底判定，用回傳值傳遞才不會被跨回合覆寫（那正是 cc-bot 兜底層
+    另一個前端把這些散在四個以頻道為 key 的全域 dict（用過工具／完成／等待／思考），
+    呼叫端再去讀。這裡收成一個回傳值——回合管線需要它們做
+    續跑與兜底判定，用回傳值傳遞才不會被跨回合覆寫（那正是那邊兜底層
     變成死碼的根因）。
     """
 
@@ -271,10 +274,10 @@ async def run_turn(
             return
         await deltas.flush()
         # 思考摘要定稿：串流中的思考是流動的（下一步一到就被蓋掉），這裡留一份固定紀錄。
-        # **不論這步有沒有動工具都要留**——cc-bot 曾把這段寫在 has_tool 判斷之後，
+        # **不論這步有沒有動工具都要留**——另一個前端曾把這段寫在 has_tool 判斷之後，
         # 純思考的步驟整步被 return 丟掉，思考就跟著蒸發了。
-        # 上限拉到 2000：預設的 220 字太短，使用者回報思考「講到一半就被吞掉」。
-        # 截在伺服器端等於**手機永遠拿不回後半段**，而思考裡常有他真正要看的東西
+        # 上限拉到 2000：預設的 220 字太短，思考會講到一半就被吞掉。
+        # 截在伺服器端等於**手機永遠拿不回後半段**，而思考裡常有真正要看的東西
         # （取票代碼、金額、日期）。長度問題交給 App 收摺處理——它預設只露幾行，
         # 想看全文再點開，畫面不會被灌爆。
         digest = think_digest(live_think, 2000) if live_think.strip() else ""
@@ -288,8 +291,7 @@ async def run_turn(
         # 400 字（2026-09-02 兩端審查各抓到一次）。定稿是伺服器的事，前端只管畫。
         # 定稿前要過 clean_reply：控制標記（[[DONE]]／[[WAIT]]／[[ASK:…]]）是給系統讀的，
         # 留著就是洩漏。先前只有最後那則 reply.final 清，step.commit 直接送原文——
-        # 於是 [[ASK:問題|選項…]] 整串以文字畫在畫面上，下面才是選項卡
-        # （2026-09-04 使用者截圖回報）。
+        # 於是 [[ASK:問題|選項…]] 整串以文字畫在畫面上，下面才是選項卡。
         # 標記要在 clean 之前看：clean_reply 會把它整串剝掉。
         if parse_ask_marker(step_text) is not None:
             ask_pending[0] = True
@@ -318,7 +320,7 @@ async def run_turn(
         live_text = ""
 
     async def _status_loop() -> None:
-        """定期送出狀態心跳。取代 cc-bot 的 _animate——這裡不畫任何東西，
+        """定期送出狀態心跳。取代另一個前端的動畫更新——這裡不畫任何東西，
         只報事實；轉圈動畫與計時由手機端本地跑，不必為此往返網路。"""
         while True:
             await asyncio.sleep(2)
@@ -458,7 +460,7 @@ async def run_turn(
                         # 那邊跑**。turn.py 隨即送出空回覆重試或 [[CONTINUE]] 續跑，於是同一
                         # 個 session 上同時有兩條 query 在跑，逐字稿從同一個 parentUuid 長出
                         # 兩支＝session 分叉。重啟 resume 只會接回其中一支，另一支的內容還在
-                        # 檔案裡但已不在脈絡裡（2026-08-14 失憶事件的真因，見 助理/待辦事項/TODO.md）。
+                        # 檔案裡但已不在脈絡裡（助理整段失憶的真因就是這個）。
                         # SDK 無從分辨（ResultMessage 不帶 promptId），只能在這裡判。
                         # 判準：我們送出的 prompt 一定會產生 AssistantMessage——就算是模型只
                         # 思考不吐字的 #50597 空回應，也有一則只含 thinking block 的
@@ -498,7 +500,7 @@ async def run_turn(
                             break
                         # 照 SDK 原生語意收工：receive_response() 的定義就是「收到
                         # ResultMessage 即結束本回合」，背景工作完成時 CLI 會另起一輪，
-                        # 那不屬於這一回合。cc-bot v1.40.0 反其道留在迴圈裡等 pending_bg
+                        # 那不屬於這一回合。另一個前端曾反其道留在迴圈裡等 pending_bg
                         # 清空，遇到「啟動常駐服務」這類永遠不發完成通知的工作就無限卡死，
                         # 回覆早生成完卻送不出去，一路卡到逾時後整段丟失。
                         #
@@ -576,7 +578,7 @@ async def run_turn(
             # 就回一個 task id、ToolResult 立刻到手，所以 tools_pending 是空的；
             # 模型接著等那件工作跑完，這段期間一個字都不會輸出。門檻於是退回 600 秒，
             # 一件跑十分鐘以上的背景工作必定讓整個回合被判定卡死中止
-            # （2026-09-04 使用者截圖：五件背景工作都 completed，回合卻被中止）。
+            # （實際踩過：五件背景工作都 completed，回合卻被中止）。
             # 背景工作的存活由 bg_notify 記帳，它有東西就代表這邊在等、不是死了。
             if bg_notify.active(conv):
                 last_activity[0] = time.time()
@@ -629,7 +631,7 @@ async def run_turn(
         diag.record(
             "turn", conv=conv, turn=turn_id,
             prompt=diag.head(prompt, 40) if wake is None else "〔wake〕",
-            msgs=[type(m).__name__ for m in messages],
+            msgs=diag.msg_summary(messages),
             failed=failure[0].kind, resets_at=failure[0].resets_at, ok=False,
         )
         await frontend.emit(make_event(
@@ -702,7 +704,7 @@ async def run_turn(
         "turn",
         conv=conv, turn=turn_id,
         prompt=diag.head(prompt, 40) if wake is None else "〔wake〕",
-        msgs=[type(m).__name__ for m in messages],
+        msgs=diag.msg_summary(messages),
         texts=[
             len("".join(b.text for b in m.content if hasattr(b, "text")))
             for m in messages if isinstance(m, AssistantMessage)

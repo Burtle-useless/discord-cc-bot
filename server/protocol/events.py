@@ -1,6 +1,6 @@
 """事件模型：引擎對外只發「語意事件」，不發渲染好的字串。
 
-cc-bot 為了塞進 Discord 2000 字上限而生的整套渲染機制（動畫、翻頁、狀態列組字串）
+聊天平台的前端為了塞進 Discord 2000 字上限而生的整套渲染機制（動畫、翻頁、狀態列組字串）
 在這裡全部不存在——手機端 LazyColumn 天生就是往下累積，怎麼畫由前端決定。
 
 `seq` / `conv_id` / `turn_id` 三個欄位從第一版就必須全帶上：
@@ -74,6 +74,10 @@ EventType = Literal[
     "stream.reset",     # 伺服器重啟了，本地游標屬於上一個世代：前端清掉本地軌跡
                         #   改用 snapshot 重建（hub.stream 在偵測到舊世代游標時發）。
     "kanban.changed",   # 看板有變動（助理的工具或 App 的操作），叫另一端重拉。
+    "session.rotated",  # 這條對話換了一段新的 session（助理每天、課程每週，見 engine.rotation）：
+                        #   {"note": str, "period": "daily"|"weekly"}
+                        #   畫面上畫一條分隔線：線以上的事，模型要翻紀錄才想得起來。
+                        #   歷史裡同一條線是 role="system"、kind="rotate" 的那一則。
 ]
 
 # 執行期用的集合。`Literal` 只在型別檢查時有意義，先前 `stream.reset` 與

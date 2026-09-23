@@ -6,9 +6,8 @@
 發 ask.request 事件（render task 畫成按鈕）、等 Future 或逾時回 None、
 `resolve()` 由按鈕回呼填答案。
 
-事件 → Discord 的對照表在 `worklog/2026-09-03 新架構規格.md` 第 5 節；跟規格不同的
-兩處：
-  1. `reply.final` 這裡**會送**回覆（規格寫不動作）：`turn.done` 的 markdown 在
+事件 → Discord 的對照見下面的處理函式；有兩處刻意跟「每個事件各畫各的」不同：
+  1. `reply.final` 這裡**會送**回覆（直覺上它不必動作）：`turn.done` 的 markdown 在
      engine 端截到 200 字，整篇回覆只有 reply.final 帶得出來；續跑每輪一則，
      先到先畫，使用者不必等全部跑完。
   2. `[[ASK:]]` 的選項跟著 reply.final 的 `ask` 欄位來（inline ask，engine 不會為它
@@ -34,6 +33,7 @@ from protocol import AskRequest, AskResponse, Event, make_event
 
 from . import files, voice
 from .canvas import Canvas, RawStore
+from .filemark import split_file_marks
 from .i18n import err_text, t
 from .render import MAX_MSG, CanvasState, fence, pipe_tables_to_code, split_message
 
@@ -378,8 +378,13 @@ class DiscordFrontend:
         typ = ev.type
         if typ == "turn.start":
             self._done_canvas = None
+            self._sent_marks = set()
             await self._canvas_feed(ev)
         elif typ in ("thinking.delta", "text.delta", "tool.call", "step.commit", "turn.end"):
+            # 中途某一步交的檔案，最終回覆不一定會再提一次——不在這裡
+            # 摘掉的話，標記會原樣畫在軌跡上而檔案永遠不會送出去
+            if typ == "step.commit":
+                await self._flush_marks(ev.data, "text")
             await self._canvas_feed(ev)
         elif typ == "status":
             await self._on_status(ev)
@@ -446,12 +451,39 @@ class DiscordFrontend:
         except Exception:  # noqa: BLE001
             log.exception("語音回覆失敗")
 
+    async def _flush_marks(self, d: dict, key: str) -> None:
+        """摘掉 `[[FILE:]]` 標記並把檔案真的送出去，就地改寫 [d][key]。
+
+        舊對話的模型還在用這個標記交檔案（見 `filemark` 模組說明）。不認的話
+        使用者只會看到一行路徑，以為檔案給了——**漏送是靜默的，沒有人會發現**。
+        """
+        text = str(d.get(key) or "")
+        clean, paths = split_file_marks(text)
+        if not paths:
+            return
+        d[key] = clean
+        ch = self._channel()
+        sent = getattr(self, "_sent_marks", None)
+        if sent is None:
+            sent = self._sent_marks = set()
+        for p in paths:
+            if p in sent:
+                continue
+            sent.add(p)
+            if ch is None:
+                continue
+            try:
+                await files.send_file(ch, p, "")
+            except Exception:  # noqa: BLE001 — 送不出去不能拖垮整則回覆
+                log.exception("舊標記的檔案送不出去：%s", p)
+
     async def _on_reply(self, d: dict) -> None:
         ch = self._channel()
         if ch is None:
             return
         if self._canvas is not None:
             self._canvas.state.feed("reply.final", d)
+        await self._flush_marks(d, "markdown")
         md = str(d.get("markdown") or "").strip()
         ask = d.get("ask")
         if md:

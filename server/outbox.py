@@ -22,7 +22,7 @@ from util import read_text_with_retry, replace_with_retry
 OUTBOX_FILE: Path = config.DATA_DIR / "outbox.json"
 
 # 手機一次下載的上限。超過這個數字不管網路多快都要等很久，而下載中途沒有進度可看，
-# 使用者只會覺得 App 壞了——這種檔案請改用 share.ps1 給連結。
+# 使用者只會覺得 App 壞了——這種檔案請改用外部的檔案分享方式給連結。
 MAX_OFFER_BYTES = 256 * 1024 * 1024
 
 # 保留幾筆登記。舊的清掉只是不能再下載，檔案本身不會動到。
@@ -91,7 +91,7 @@ def offer(path: str, note: str = "", conv_id: str = "-") -> dict[str, Any]:
     if size > MAX_OFFER_BYTES:
         raise OutboxError(
             f"檔案太大（{size // (1024 * 1024)}MB，上限 "
-            f"{MAX_OFFER_BYTES // (1024 * 1024)}MB）。這種請改用 share.ps1 給他下載連結"
+            f"{MAX_OFFER_BYTES // (1024 * 1024)}MB）。這種請改用檔案分享服務給他下載連結"
         )
 
     item = {

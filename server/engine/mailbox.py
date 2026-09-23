@@ -9,7 +9,7 @@ ResultMessage 就 break 走人。這個模型有一個沒有出口的漏洞—�
 當成自己的回覆讀走（問 A 卻回上一件事的 B）。舊做法是收工時偵測到還有背景
 工作就把整個 client 丟掉（disconnect），用斬斷連線換乾淨——代價是那則通知
 連同它帶的摘要與輸出檔路徑一起蒸發，使用者永遠不會知道他丟到背景的東西跑完了。
-2026-08-23 使用者回報「我們好像忘了做自動喚醒」講的就是這件事：那天腳本
+症狀就是「背景工作跑完沒有人自動醒來」：腳本
 09:58 就跑完並寫好了輸出檔，助理 09:57 收工，沒有任何人回頭看一眼。
 
 這一層把「誰在讀」從回合提升到對話：**唯一的讀取者常駐在這裡**，回合開始時
@@ -36,13 +36,16 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 from typing import Any, AsyncIterator, Awaitable, Callable
 
-from claude_agent_sdk import AssistantMessage, ClaudeSDKClient, StreamEvent
+from claude_agent_sdk import AssistantMessage, ClaudeSDKClient, CLIConnectionError, StreamEvent
 from claude_agent_sdk._errors import MessageParseError
 from claude_agent_sdk._internal.message_parser import parse_message
 
 from protocol import Frontend
+
+from . import proctree
 
 log = logging.getLogger(__name__)
 
@@ -139,7 +142,7 @@ class WakeTicket:
 
         沒人領的收件匣會一直吃 pump 投進來的訊息，而下一個使用者回合會把它
         認養走——裡面那個早就結束的週期就被當成那個回合的回覆讀掉（問 A 回 B，
-        2026-08-14 那種失憶事件的同一塊地雷）。所以要明確收掉：裡面的東西改走
+        跟助理整段失憶是同一塊地雷）。所以要明確收掉：裡面的東西改走
         idle 處理（終結通知照樣結帳），模型活動則直接丟，不再開新票。
         """
         if not self.pending():
@@ -154,6 +157,17 @@ class WakeTicket:
                 await self.box._on_idle(self.box.conv_id, self.box.frontend, item)
             except Exception:  # noqa: BLE001
                 log.exception("丟棄 wake 收件匣時處理訊息失敗（對話 %s）", self.box.conv_id)
+
+
+def cli_pid(client: Any) -> int | None:
+    """這個 client 底下 claude.exe 的 pid；拿不到（還沒連、假 client、SDK 改了私有結構）回 None。
+
+    跟 `iter_messages` 一樣是碰 SDK 私有結構的地方，集中在這一支檔。
+    """
+    try:
+        return int(client._transport._process.pid)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 async def iter_messages(client: ClaudeSDKClient) -> AsyncIterator[Any]:
@@ -202,6 +216,17 @@ class Mailbox:
         # （wake 回合或認養它的使用者回合）就歸零。
         self._wake: asyncio.Queue[Any] | None = None
         self._task: asyncio.Task[None] | None = None
+        # 最後一次有訊息進來的時刻（monotonic）。連線池的閒置回收看它，不看「上次取用」：
+        # 一個跑了二十分鐘的回合只在開頭取用過一次，照取用時間算它早就「閒置」了。
+        self.last_activity: float = time.monotonic()
+
+    def busy(self) -> bool:
+        """這條連線上有事在進行：有回合正在收件，或有一張 wake 票還沒人領。
+
+        這時候關掉它，就是殺掉正在進行的回合或助理剛醒來的那一輪。連線池的淘汰與閒置回收
+        一律先問這個（背景工作另外由 bg_notify 判斷）。
+        """
+        return self._inbox is not None
 
     def start(self) -> None:
         """啟動常駐讀取者。重複呼叫無害。"""
@@ -223,6 +248,7 @@ class Mailbox:
     async def _deliver(self, item: Any) -> None:
         """投遞一則訊息：有回合在收就給回合；模型自己開口就開 wake 收件匣；
         其餘走回合外處理。"""
+        self.last_activity = time.monotonic()
         q = self._inbox
         if q is not None:
             q.put_nowait(item)
@@ -298,11 +324,49 @@ class Mailbox:
         return self._task is not None and not self._task.done()
 
     async def close(self) -> None:
-        """停掉讀取者並關閉 client。永不拋例外。"""
+        """停掉讀取者、叫醒正在收件的回合、關閉 client 並確認行程真的結束。
+
+        除了呼叫端本身被取消（CancelledError 照常往上傳）之外不拋例外；
+        就算呼叫端被取消，收尾也會在背景跑完。
+        """
         t, self._task = self._task, None
         if t is not None and not t.done():
             t.cancel()
             with contextlib.suppress(BaseException):
                 await t
+        # **正在收件的回合要叫醒。** 讀取者被取消時什麼都不投遞，掛在 `inbox.get()` 的
+        # 回合就永遠等不到東西，只能等 600 秒的閒置逾時——畫面上的計時照跳（心跳是
+        # runner 自己發的），看起來像在思考，實際上 CLI 早就沒了。「回合中換模型」
+        # 只是其中一個觸發點（設定端點不再 drop 忙碌中的連線），
+        # 閒置回收、LRU 淘汰這些路徑一樣會關掉有人在讀的連線。
+        # 投遞一個連線錯誤：回合走既有的 TRANSPORT_ERRORS 善後，以錯誤收場而不是空等。
+        q = self._inbox
+        if q is not None:
+            q.put_nowait(CLIConnectionError("這條連線已被關閉（回收、刪除對話或服務收工）"))
+        # 收尾放進獨立的 task 並 shield：SDK 的 close() 在呼叫端正被 asyncio 取消時會
+        # 跳過 terminate／kill（它自己的 docstring 寫明），claude.exe 就這樣活下來。
+        # 使用者按停止時 drop 正好跑在被取消的回合收尾裡——實測服務底下殘留好幾天前的
+        # CLI 行程樹、幾十個行程閒置好幾天，就是這個縫。
+        fin = asyncio.ensure_future(self._shutdown_client())
+        try:
+            await asyncio.shield(fin)
+        except asyncio.CancelledError:
+            raise       # 呼叫端被取消：收尾 task 自己會跑完，取消照常往上傳
+        except Exception:  # noqa: BLE001
+            log.exception("關閉對話 %s 的連線時出錯", self.conv_id)
+
+    async def _shutdown_client(self) -> None:
+        """disconnect，然後收掉還活著的 CLI／MCP 行程（見 engine.proctree）。"""
+        pid = cli_pid(self.client)
+        # 樹要在關閉**前**記下：CLI 一死，子行程的父 pid 就指向一個不存在的行程，
+        # 關閉後再從 CLI 往下找會一個都找不到
+        tree = await asyncio.to_thread(proctree.descendants, pid) if pid else []
         with contextlib.suppress(Exception):
             await self.client.disconnect()
+        if tree:
+            killed = await asyncio.to_thread(proctree.reap, tree)
+            if killed:
+                log.warning(
+                    "對話 %s 的 CLI 關閉後還有 %d 個行程沒結束，已收掉：%s",
+                    self.conv_id, len(killed), ", ".join(f"{p.name}({p.pid})" for p in killed),
+                )

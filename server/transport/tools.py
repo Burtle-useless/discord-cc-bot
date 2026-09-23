@@ -17,8 +17,8 @@ def _grab_sync(all_screens: bool) -> bytes:
     """截目前螢幕畫面，回 PNG bytes。
 
     用 PIL.ImageGrab 而不是外呼 PowerShell：同進程、無暫存檔、快一個數量級。
-    all_screens=True 涵蓋整個虛擬桌面（這台機器是雙螢幕，只抓主螢幕會漏掉一半，
-    見過去 Win32_VideoController -First 1 推錯結論的教訓）。
+    all_screens=True 涵蓋整個虛擬桌面（多螢幕時只抓主螢幕會漏掉一半，
+    而 Win32_VideoController 只取第一筆同樣會推出錯的結論）。
     """
     from PIL import ImageGrab
 

@@ -20,26 +20,53 @@ from datetime import datetime, timedelta
 ErrKind = str
 
 
+def _code(s: str, code: int) -> bool:
+    """訊息裡有沒有這個 HTTP 狀態碼——**整個數字**，不是子字串。
+
+    子字串比對的話，「14012 ms」含 `401` 會被判成 AUTH；「1529」含 `529` 會被判成滿載。
+    狀態碼前後不能再接數字才算。
+    """
+    return re.search(rf"(?<!\d){code}(?!\d)", s) is not None
+
+
 def classify(err: str) -> ErrKind:
-    """把例外訊息歸類。比對字串是刻意的——SDK 不提供結構化錯誤碼。"""
+    """把例外訊息歸類。比對字串是刻意的——SDK 不提供結構化錯誤碼。
+
+    數字一律整字比對（見 `_code`）；關鍵字盡量用整句片語，不用單字——
+    「initialize」單獨出現在「failed to initialize MCP server」這種跟握手逾時
+    無關的訊息裡，先前就這樣被歸成 INIT_TIMEOUT、白白丟掉 client。
+    """
     s = (err or "").lower()
     if "exceeded maximum buffer size" in s or "failed to decode json" in s:
         return "INPUT_TOO_LARGE"
-    if "prompt is too long" in s or ("400" in s and "too long" in s):
+    # context 爆掉會清 session（見 RESET_SESSION），誤判的代價是整條對話失憶，
+    # 所以只認明確講 prompt／context／token 太長的。「400＋too long」以前就算，
+    # 一個欄位太長的 400 也會被當成 context 滿了
+    if ("prompt is too long" in s or "context window" in s or "context length" in s
+            or (_code(s, 400) and "too long" in s
+                and any(w in s for w in ("prompt", "context", "token")))):
         return "CONTEXT_FULL"
-    if "529" in s or "overloaded" in s:
+    if _code(s, 529) or "overloaded" in s:
         return "OVERLOADED"
     # 「hit your … limit」是 CLI 額度用盡時放進回覆文字的句型（session limit／
     # usage limit／weekly limit 都是這個形狀），跟 API 的 429 是同一件事。
-    if ("429" in s or "rate_limit" in s or "rate limit" in s
-            or "hit your" in s and "limit" in s or "usage limit" in s):
+    if (_code(s, 429) or "rate_limit" in s or "rate limit" in s
+            or ("hit your" in s and "limit" in s) or "usage limit" in s):
         return "RATE_LIMIT"
     if "failed to start claude" in s or "winerror 267" in s or "目錄名稱無效" in s:
         return "STARTUP"
-    if "401" in s or "credential" in s or "authentication" in s or "unauthorized" in s:
+    # 「Failed to authenticate」不含 authentication——OAuth 過期時就是這句，
+    # 被歸成 UNKNOWN 的話 client 不會丟，之後每一輪都 401。用字根比對。
+    if (_code(s, 401) or "credential" in s or "authenticat" in s or "unauthorized" in s
+            or "oauth" in s or "invalid api key" in s or "run /login" in s):
         return "AUTH"
-    if "control request timeout" in s or "initialize" in s:
+    if "control request timeout" in s or ("initialize" in s and ("timeout" in s or "timed out" in s)):
         return "INIT_TIMEOUT"
+    # ResultMessage.subtype：CLI 自己標的收場方式
+    if "error_max_turns" in s:
+        return "MAX_TURNS"
+    if "error_during_execution" in s:
+        return "EXEC_ERROR"
     return "UNKNOWN"
 
 
@@ -63,6 +90,8 @@ USER_FACING: dict[str, str] = {
     "STARTUP": "Claude Code 起不來，多半是工作目錄不存在。",
     "TIMEOUT": "太久沒有任何回應，我把這回合中止了。",
     "INIT_TIMEOUT": "Claude Code 初始化卡住了，我重開一個試試。",
+    "MAX_TURNS": "這一輪做了太多步，先停在這裡。要我接著做就說一聲。",
+    "EXEC_ERROR": "這一輪跑到一半出錯了。",
     "UNKNOWN": "出了點狀況。",
 }
 
@@ -81,8 +110,13 @@ def parse_resets_at(text: str, now: float | None = None) -> float | None:
     解析回復時刻。CLI 通常會另外送 RateLimitEvent 帶 resets_at，這是它沒送時的後備：
     沒有時刻就沒辦法自動續跑，只能叫人自己回來。
 
-    時間當本機時區（那串文字本來就是照本機時區印的）。今天的那個時刻已經過了
-    就算明天。
+    時間當本機時區（那串文字本來就是照本機時區印的）。
+
+    **今天的那個時刻已經過了：剛過（三小時內）就回那個過去的時刻，過很久才算明天。**
+    一律算明天的話：19:31 看到「resets 7:20pm」會解析成隔天 19:20，
+    回復時間錯了 24 小時。額度是滾動回復的，CLI 印出來的時刻本來都在未來；
+    會看到剛過的時刻，代表那句話是稍早產生的、額度多半已經回來了。
+    呼叫端看到過去的時刻，自己決定要不要稍等一下就重試（見 worker）。
     """
     m = _RESETS_RE.search(text or "")
     if not m:
@@ -98,9 +132,17 @@ def parse_resets_at(text: str, now: float | None = None) -> float | None:
         return None
     base = datetime.fromtimestamp(now if now is not None else time.time())
     target = base.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    if target.timestamp() <= base.timestamp():
+    if base.timestamp() - target.timestamp() > _RECENT_PAST_SEC:
         target = target + timedelta(days=1)
     return target.timestamp()
+
+
+# 回復時刻比現在早多少以內算「剛過」（見 parse_resets_at）。
+_RECENT_PAST_SEC = 3 * 3600
+
+# 回復時刻已經過了（或就是現在）時，自動重跑前至少等多久。給額度一點時間真的回來，
+# 也避免一句過時的「resets …」讓訊息在一秒內連撞兩次。
+MIN_RESUME_WAIT_SEC = 60.0
 
 
 def reset_label(resets_at: float | None) -> str:
@@ -139,10 +181,12 @@ class CCError(Exception):
         if self.kind == "RATE_LIMIT" and self.resets_at:
             when = reset_label(self.resets_at)
             wait = self.resets_at - time.time()
-            if 0 < wait <= AUTO_RESUME_MAX_SEC:
+            if wait <= 0:
+                # 時刻已經過了（見 parse_resets_at）：worker 會稍等一下再自動試一次
+                return "用量到上限了，應該快回復了，我等一下自動再試一次。"
+            if wait <= AUTO_RESUME_MAX_SEC:
                 return f"用量到上限了，{when} 回復後我會自動接著做。"
-            if wait > 0:
-                return f"用量到上限了，{when} 才會回復。"
+            return f"用量到上限了，{when} 才會回復。"
         return USER_FACING.get(self.kind, USER_FACING["UNKNOWN"])
 
     @property

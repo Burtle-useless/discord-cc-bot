@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 import config
+from util import is_session_id
 
 from .history import _text_of
 from .state import _load_map
@@ -245,6 +246,8 @@ def session_text(session_id: str, max_chars: int = 3000, keep: str = "head") -> 
 
 def session_cwd(session_id: str) -> str:
     """單獨問一個 session 的工作目錄。接管時要用它把對話的 cwd 設對。"""
+    if not is_session_id(session_id):
+        return ""
     for jf in _projects_dir().glob(f"*/{session_id}.jsonl"):
         rec = _any_record_with_cwd(jf)
         return str((rec or {}).get("cwd") or "")
@@ -274,6 +277,8 @@ def fork_session(session_id: str) -> str | None:
     （`"sessionId":"<uuid>"`）完全可能出現在對話內容裡——光是討論這個 bug
     的那幾輪就寫過好幾次——字串取代會連人家講的話一起改掉。
     """
+    if not is_session_id(session_id):
+        return None
     src = next(iter(_projects_dir().glob(f"*/{session_id}.jsonl")), None)
     if src is None:
         return None

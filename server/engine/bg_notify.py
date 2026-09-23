@@ -23,8 +23,8 @@
 接著講——跟官方終端機一模一樣。2026-08-23 到 2026-09-02 之間這裡曾經自己
 排一則中文散文（「〔背景工作回報〕…」）進使用者佇列把助理叫醒，而 CLI 原生那個
 週期落在回合外被整段丟掉：同一件事模型跑兩遍、使用者看到的是第二遍，畫面上
-還多一則他沒打過的話（2026-08-25 回報「甚至我還看得到」；2026-09-02 定案
-「走訊息通知太潦草了」）。現在原生那個週期由 `mailbox` 開成 wake 回合接住
+還多一則使用者沒打過的話。靠自排訊息把助理叫醒本來就太潦草，
+現在原生那個週期由 `mailbox` 開成 wake 回合接住
 （見 `on_wake`），這裡只留「助理為什麼醒來」的線索給 wake 回合開頭用（`wake_reason`）。
 
 SDK 早就把該給的都給了：`TaskStartedMessage` 帶描述、`TaskProgressMessage`
@@ -271,7 +271,7 @@ def orphan_all(conv_id: str) -> int:
     TaskStarted 之後再也收不到 progress，更不會有終結訊息，於是那筆帳永遠停在
     running，卡片就一直掛在畫面上。
 
-    2026-09-01 實例：一件「看五路實際讀值」掛了 12.6 小時，工具 0、token 0。
+    實際踩過：一件要跑很久的背景工作掛了 12.6 小時，工具 0、token 0。
     `client_pool.peek()` 的註解早就寫著「進程如果已經被回收，工作也早就跟著
     沒了」，但只有使用者按下「停」那條路徑會走到善後，閒置回收自己不做。
 
@@ -330,7 +330,7 @@ def terminal_status(msg: Any) -> str | None:
     TaskUpdatedMessage with no accompanying TaskNotificationMessage」，並要求
     追蹤中的 task id 要在**任一種**訊息帶終結狀態時清掉。
 
-    2026-08-29 就踩到了：一件「產生測試件並出圖」的背景工作跑完之後卡片一直停在
+    實際踩過：一件會產出檔案的背景工作跑完之後卡片一直停在
     進行中，帳上那筆的進度全是 0。butler 當時只認 TaskNotificationMessage，
     整個專案沒有一處碰過 TaskUpdatedMessage。
     """

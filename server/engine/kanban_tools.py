@@ -68,8 +68,8 @@ async def kanban_list(args: dict[str, Any]) -> dict[str, Any]:
 
 @tool(
     "kanban_add",
-    "在看板上新增一件工作。標題要帶得出是哪個企劃的，像「助理－看板拖放」"
-    "或「論文－補 EIS 圖」，這樣他一眼掃得出來。",
+    "在看板上新增一件工作。標題要帶得出是哪個企劃的，像「網站改版－首頁排版」"
+    "或「報告－補圖表」，這樣他一眼掃得出來。",
     _schema({
         "title": {"type": "string",
                   "description": "這件工作要做什麼。前面帶企劃名，用「－」隔開"},

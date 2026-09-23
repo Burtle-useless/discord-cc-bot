@@ -30,4 +30,5 @@ jobs:
           python lu/tests/test_migrate.py
           python lu/tests/test_render.py
           python lu/tests/test_schedule.py
+          python lu/tests/test_filemark.py
           python test_wt_core.py

@@ -1,7 +1,7 @@
 """每條對話一個回合工作者：排隊、合併、插話、停止、wake 回合、限流自動續跑。
 
-這一段原本長在 transport/app.py 裡。2026-09-03 抽出來的理由只有一個：Discord 那邊的
-cc-bot 也要用同一套「一條對話一個 worker」的規矩，而它不跑 FastAPI。做成類別而不是
+這一段原本長在 transport/app.py 裡。2026-09-03 抽出來的理由只有一個：聊天平台那邊的
+前端也要用同一套「一條對話一個 worker」的規矩，而它不跑 FastAPI。做成類別而不是
 模組全域，是讓兩個前端各自持有一份、互不干擾；一個進程裡照樣只需要一個實例。
 
 它認得的東西全在 engine 與 protocol 裡：`turn.handle_turn`／`handle_wake` 跑回合、
@@ -30,7 +30,7 @@ from util import atomic_write_text, read_text_with_retry
 from . import bg_notify
 from . import runner as engine_runner
 from . import state as state_mod
-from .errors import AUTO_RESUME_MAX_SEC, reset_label
+from .errors import AUTO_RESUME_MAX_SEC, MIN_RESUME_WAIT_SEC, reset_label
 from .mailbox import WakeTicket
 from .state import get_state
 from .turn import handle_turn, handle_wake, stamp
@@ -96,7 +96,7 @@ async def _take_batch(q: asyncio.Queue[QueueItem]) -> list[QueueItem]:
 
 
 def _merge(items: list[str]) -> str:
-    """把整批訊息合併成一次 prompt（對照 cc-bot 的 _merge_queued）。
+    """把整批訊息合併成一次 prompt（對照另一個前端的佇列合併）。
 
     那句「後面的可能在修正前面的」是關鍵：少了它，模型會把幾則訊息當成
     幾件平行任務全做一遍，而人在等待時補的話多半是更正而不是加碼。
@@ -199,8 +199,8 @@ class Worker:
 
         為什麼 snapshot 需要它：排隊中的訊息還沒送進 CC，所以逐字稿裡沒有它。
         App 一重建畫面（重裝、被系統回收、stream.reset）就是從逐字稿重讀，
-        那則訊息於是從畫面上消失，但伺服器照樣會處理它——使用者 2026-08-18 回報
-        「我這邊看不到我傳的訊息了，但它實際還排在那邊」。
+        那則訊息於是從畫面上消失，但伺服器照樣會處理它——畫面上看不到自己
+        剛剛送出的訊息，它其實還排在佇列裡。
         """
         q = self.queues.get(conv_id)
         if q is None:
@@ -261,7 +261,7 @@ class Worker:
 
         這裡就是 2026-08-25 到 2026-09-02 之間 `_resume_after_bg` 的位置：那時
         butler 自己排一則中文散文當使用者訊息把助理叫醒，而 CLI 原生那一輪被整段
-        丟掉——同一件事跑兩遍。使用者 2026-09-02：「走訊息通知太潦草了」。
+        丟掉——同一件事跑兩遍，而且靠自排訊息叫醒本來就太潦草。
         """
         q = self.ensure(conv_id)
         q.put_nowait(Wake(ticket))
@@ -353,12 +353,17 @@ class Worker:
             # 額度用盡：訊息不丟，等到 CLI 說的回復時刻自動再跑一次（只等一次，
             # 再撞就交給人）。等待期間 `running` 指著 sleep 那個 task，所以按停止
             # 停得掉、新送來的訊息會照規矩排隊在後面。
-            wait = err.resets_at - time.time()
-            if 0 < wait <= AUTO_RESUME_MAX_SEC:
+            # 回復時刻已經過了（CLI 那句話是稍早產生的，見 errors.parse_resets_at）
+            # 也照樣等一下再試：先前 wait<=0 直接放棄，訊息就停在「用量到上限」
+            wait = max(err.resets_at - time.time(), MIN_RESUME_WAIT_SEC)
+            if wait <= AUTO_RESUME_MAX_SEC:
+                resume_at = time.time() + wait
                 await fe.emit(make_event(
                     conv_id, "-", "status",
-                    note=f"額度用完了，{reset_label(err.resets_at)} 自動繼續",
+                    note=f"額度用完了，{reset_label(resume_at)} 自動繼續",
                     phase="waiting",
+                    # 實際會重跑的時刻（前端畫倒數用）。不是 err.resets_at：那個可能已經過了
+                    resets_at=resume_at,
                 ))
                 # 等待期間服務重啟（使用者按重新啟動、當機）會把佇列連同這則一起弄丟。
                 # 先落檔，啟動時 `restore_pending` 會把它重新排回去

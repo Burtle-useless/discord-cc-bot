@@ -7,7 +7,7 @@
 使用者真正在意的是後者。前者的金額欄在訂閱制下多半是 0——SDK 的
 total_cost_usd 是按 API 計價回報的，吃訂閱時它給不出有意義的數字。
 
-作法沿用 cc-bot（discord_bot.py 的 fetch_usage）：拿 Claude Code 自己存在
+作法沿用另一個前端的用量查詢：拿 Claude Code 自己存在
 ~/.claude/.credentials.json 的 OAuth token 去打官方端點。這不是公開 API，
 沒有版本保證，所以整支檔案的失敗策略一律是「回 None，畫面就不顯示這一塊」，
 絕不能讓它把 /v1/usage 整條打掉。
