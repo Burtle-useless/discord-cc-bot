@@ -91,7 +91,7 @@ def clean_reply(content: str) -> str:
 
 
 def header_line(prompt: str, origin: str, wake: dict | None) -> str:
-    """畫布頂部那一行。origin=wake 時是「背景工作完成，陸接手」，不是使用者原文。"""
+    """畫布頂部那一行。origin=wake 時是「背景工作完成，lu 接手」，不是使用者原文。"""
     if origin == "wake":
         desc = one_line(str((wake or {}).get("desc") or ""))
         return t("canvas_wake", desc=no_ticks(desc)[:60]) if desc else t("canvas_wake_plain")

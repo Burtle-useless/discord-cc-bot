@@ -491,6 +491,9 @@ async def run_turn(
                         if limit_hit[0] or message.is_error:
                             text = (message.result or "").strip()
                             kind = "RATE_LIMIT" if limit_hit[0] else classify(text or message.subtype)
+                            if kind == "MODEL_NEEDS_UPDATE":
+                                # 記下來：下次開面板這顆就灰掉，不必等背景試跑
+                                models.note_rejected(eff_model(state), text)
                             resets = limit_reset[0]
                             if kind == "RATE_LIMIT" and not resets:
                                 # CLI 沒送 RateLimitEvent（或沒帶時刻）時，從那句

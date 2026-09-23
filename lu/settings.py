@@ -1,4 +1,4 @@
-"""陸自己的設定：讀 `.env`，整理成一個 frozen dataclass。
+"""lu 自己的設定：讀 `.env`，整理成一個 frozen dataclass。
 
 **這個模組刻意不叫 `config.py`**：引擎的 `server/config.py` 會被加進 sys.path，
 同名會撞。也刻意**不 import 任何 engine 的東西**——它得在 `bootstrap.prepare()`
@@ -40,7 +40,7 @@ BROKEN_SERVER_MSG = (
 # 換了號碼那幾支腳本全部要改。
 LOCK_PORT: int = 47361
 
-# 這幾個是**引擎**（`server/config.py`）在 import 當下讀的環境變數，陸自己不用。
+# 這幾個是**引擎**（`server/config.py`）在 import 當下讀的環境變數，lu 自己不用。
 # `.env` 的值不會自己進 os.environ，所以要原樣收下、由 `bootstrap.prepare()` 轉過去；
 # 少了這一步，在 .env 裡寫 DEFAULT_MODEL 會完全沒有反應且不報錯。
 # （BUTLER_PORT／BIND／TOKEN 那些是手機 App 伺服器專用的，Discord 這邊沒有意義，不收。）
@@ -55,7 +55,7 @@ ENGINE_ENV_KEYS: tuple[str, ...] = (
 
 @dataclass(frozen=True, slots=True)
 class Settings:
-    """陸的全部設定。欄位一旦建好就不變；要改就重建一個。"""
+    """lu 的全部設定。欄位一旦建好就不變；要改就重建一個。"""
 
     token: str | None                 # 沒有 token 只能乾跑（--check），不能上線
     owner_id: int                     # 主帳號

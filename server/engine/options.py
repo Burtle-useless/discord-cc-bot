@@ -348,6 +348,15 @@ def thinking_off(state: ConvState) -> dict:
     return {"type": "disabled"}
 
 
+def _fallback_for(model: str) -> str | None:
+    """過載備援模型。跟主模型是同一顆時不給——CLI 不接受兩個一樣的
+    （選單裡現在選得到 Sonnet，主模型就可能正好是備援那顆）。"""
+    from . import models
+    if models.resolve(model) == models.resolve(config.FALLBACK_MODEL):
+        return None
+    return config.FALLBACK_MODEL
+
+
 def build_options(state: ConvState, frontend: Frontend) -> ClaudeAgentOptions:
     """依對話狀態組出 ClaudeAgentOptions（建立長駐 client 時用一次）。"""
     # cwd 防護：切換歷史 session 可能帶入已不存在的目錄（WinError 267），退回預設
@@ -370,7 +379,7 @@ def build_options(state: ConvState, frontend: Frontend) -> ClaudeAgentOptions:
         # 也不必再開一個子進程去守一份 JSON 檔。
         # 刻意不設 allowed_tools——那是白名單，一設下去 CC 內建工具全被擋掉。
         mcp_servers=servers_for(state),
-        fallback_model=config.FALLBACK_MODEL,
+        fallback_model=_fallback_for(eff_model(state)),
         max_buffer_size=config.MAX_BUFFER_SIZE,
         # system_prompt 用 preset+append：自訂規則以「疊加」方式放在 Claude Code 完整
         # 預設 prompt 之上，保留預設行為框架與 CLAUDE.md 的開場注入。

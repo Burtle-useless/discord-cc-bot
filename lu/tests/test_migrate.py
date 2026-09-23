@@ -1,4 +1,4 @@
-"""狀態遷移：舊 cc-bot 的檔 → 陸（engine）的格式。全部在暫存目錄裡跑。"""
+"""狀態遷移：舊 cc-bot 的檔 → lu（engine）的格式。全部在暫存目錄裡跑。"""
 from __future__ import annotations
 
 import json
@@ -43,8 +43,8 @@ def test_convert() -> None:
     check("反查表只收有 session 的", by_sid == {"sid-a": "dc:111", "sid-b": "dc:222"}, str(by_sid))
 
     titles = migrate_state.convert_titles(
-        {"sid-a": "設定檔的事", "sid-b": "  改槍工具  ", "sid-gone": "沒有頻道了"}, by_sid)
-    check("標題換成 conv_id 當鍵", titles == {"dc:111": "設定檔的事", "dc:222": "改槍工具"},
+        {"sid-a": "設定檔的事", "sid-b": "  報帳小工具  ", "sid-gone": "沒有頻道了"}, by_sid)
+    check("標題換成 conv_id 當鍵", titles == {"dc:111": "設定檔的事", "dc:222": "報帳小工具"},
           str(titles))
 
     check("帳號預設對齊 engine",

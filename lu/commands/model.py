@@ -1,9 +1,13 @@
 """/model 面板與 /effort 捷徑。
 
 面板是 ephemeral 的，三個 select：模型、思考強度、套用範圍（這個對話／帳號預設）。
-資料全部來自 `engine.models`（官方清單，CLI 升版自己長出新模型），生效值打勾；
+資料全部來自 `engine.models`（官方清單，新模型發佈當天就會出現），生效值打勾；
 選了模型之後思考強度只列該模型的 `supportedEffortLevels`。選了就立刻套用並存檔，
 沒有「套用」按鈕——少一步。
+
+官方清單上有、這一版 Claude Code 卻跑不動的模型（`available=False`，後端要求較新的
+CLI）照樣列出來，讓人知道有這顆，但說明改成「要更新 Claude Code 才能用」；選了不套用，
+面板上多一行說怎麼更新——套上去的話，之後每一回合都會直接被後端擋掉。
 
 套用之後把這條對話的長駐 client 丟掉，下一回合以新設定重建；
 回合進行中不丟（會把正在跑的那輪殺掉）——生效值本來就在 client 指紋裡，
@@ -16,6 +20,7 @@ from typing import TYPE_CHECKING
 import discord
 from discord import app_commands
 
+import config
 from engine import client_pool
 from engine import models
 from engine import state as state_mod
@@ -27,8 +32,15 @@ from ..profile import conv_id as conv_of
 if TYPE_CHECKING:
     from ..bootstrap import BotContext
 
-FOLLOW = "__follow__"      # 這個對話跟著帳號預設
+FOLLOW = "__follow__"      # 不設：對話層跟著帳號預設，帳號層跟著官方建議
 DEFAULT_EFFORT = "__default__"
+
+
+def _needs_update(m: models.ModelInfo) -> str:
+    """跑不動的模型的說明：知道要哪一版就寫出來。"""
+    if m.requires_cli:
+        return t("model_needs_update_desc_ver", ver=m.requires_cli)
+    return t("model_needs_update_desc")
 
 
 class ModelPanel(discord.ui.View):
@@ -79,26 +91,40 @@ class ModelPanel(discord.ui.View):
         ])
         scope.callback = self._on_scope
         self.add_item(scope)
-        # 模型
+        # 模型。最前面那列是「不設」：對話層跟著帳號預設，帳號層跟著官方建議
+        # （CLI 的 `default` 別名）。官方清單沒有獨立的 default 那一列，不放這列的話
+        # 帳號層選過任何一顆就回不去了
         opts: list[discord.SelectOption] = []
         if self.scope == "conv":
             opts.append(discord.SelectOption(label=t("model_follow_default"), value=FOLLOW,
                                              default=cur_model is None))
+        else:
+            rec = models.find("default")
+            opts.append(discord.SelectOption(
+                label=t("model_official_default"), value=FOLLOW,
+                description=t("model_official_default_desc", model=rec.name)[:100] if rec else None,
+                default=cur_model is None,
+            ))
+        # 存下來的值可能是別名或系列名（舊資料存 `opus[1m]`），要照 find 的規則對到清單那列
+        hit = models.find(cur_model) if cur_model else None
         for m in models.catalog()[:24]:
+            desc = (m.description or m.resolved) if m.available else _needs_update(m)
             opts.append(discord.SelectOption(
                 label=m.name[:100], value=m.value[:100],
-                description=(m.description or m.resolved or None) and (m.description or m.resolved)[:100],
-                default=(cur_model == m.value or (cur_model is not None and cur_model == m.resolved)),
+                description=desc[:100] if desc else None,
+                default=hit is not None and hit.value == m.value,
             ))
-        if cur_model and not any(o.value == cur_model for o in opts):
-            # 舊資料存的完整 id 不在官方清單上：照樣列出來，不然打勾的東西不見了
+        if cur_model and not any(o.default for o in opts):
+            # 對不到清單上任何一列（清單沒有、或排在 24 顆之後）：照樣列出來，不然打勾的東西不見了
             opts.append(discord.SelectOption(label=cur_model[:100], value=cur_model[:100], default=True))
         model_sel = discord.ui.Select(placeholder=t("model_panel_pick_model"), options=opts[:25])
         model_sel.callback = self._on_model
         self.add_item(model_sel)
         # 思考強度：依生效模型列
         st = get_state(self.conv)
-        basis = cur_model or (eff_model(st) if self.scope == "conv" else None)
+        # 帳號層沒設：生效的是內建預設（config.DEFAULT_MODEL，預設是官方別名 default）。
+        # 拿 None 去查會回完整清單，預設那顆若不支援思考強度就會列出選不了的等級
+        basis = cur_model or (eff_model(st) if self.scope == "conv" else config.DEFAULT_MODEL)
         levels = models.efforts_for(basis)
         eopts = [discord.SelectOption(label=t("effort_default_opt"), value=DEFAULT_EFFORT,
                                       default=cur_effort is None)]
@@ -133,6 +159,12 @@ class ModelPanel(discord.ui.View):
         value = sel[0]
         if value != FOLLOW and not models.is_known(value):
             self.notice = t("model_unknown", model=value)
+            await self._refresh(inter)
+            return
+        info = models.find(value) if value != FOLLOW else None
+        if info is not None and not info.available:
+            self.notice = t("model_needs_update", model=info.name, need=_needs_update(info),
+                            how=t("model_update_how"))
             await self._refresh(inter)
             return
         await self._apply(model=None if value == FOLLOW else value, effort=..., inter=inter)
@@ -178,6 +210,8 @@ def register(tree: app_commands.CommandTree, ctx: "BotContext") -> None:
     async def cmd_model(inter: discord.Interaction) -> None:
         if not await auth.check(inter):
             return
+        # 打開面板也算一個更新時機：官方清單過期了就在背景重拿，下次開就是新的
+        models.schedule_refresh()
         panel = ModelPanel(ctx, conv_of(inter.channel_id), inter.user.id)
         await inter.response.send_message(panel.text(), view=panel, ephemeral=True)
 

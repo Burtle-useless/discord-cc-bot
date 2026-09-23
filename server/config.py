@@ -165,6 +165,16 @@ NOTES_FILE: Final[str] = (os.environ.get("BUTLER_NOTES_FILE") or "").strip()
 # 環境變數，**但必須指向原生 .exe**，不能是 npm 在 Windows 裝出來的 .cmd shim。
 CLAUDE_CLI: Final[str | None] = os.environ.get("CLAUDE_CLI") or None
 
+# 共用同一個 Python 環境的其他服務的重啟腳本（用 `wscript.exe //B` 跑，所以是 .vbs）。
+# 從 App 更新 SDK 之後它們也要重啟，記憶體裡的 SDK 才會換成新版。
+# 只認 `BUTLER_PEER_RESTART` 環境變數；沒設就只重啟這個服務自己。
+def _peer_restart() -> Path | None:
+    override = (os.environ.get("BUTLER_PEER_RESTART") or "").strip()
+    return Path(override) if override else None
+
+
+PEER_RESTART: Final[Path | None] = _peer_restart()
+
 # ── 監聽位址（安全地基，見計畫風險 #7）──────────────────────────────────────
 PORT: Final[int] = int(os.environ.get("BUTLER_PORT") or 47362)
 # 開發旗標：**強制**綁 127.0.0.1。預設關閉，只在本機開發期手動開。
@@ -288,11 +298,13 @@ def resolve_bind_host() -> str:
 
 
 # ── 模型與引擎 ───────────────────────────────────────────────────────────────
-DEFAULT_MODEL: Final[str] = os.environ.get("DEFAULT_MODEL") or "claude-sonnet-4-6"
+# 沒設帳號預設時用的模型。`default` 是 CLI 的官方別名＝官方當下建議的那顆，
+# 換代不必改（寫死完整 id 的話，新模型出了好幾代都還會停在舊的那顆）。
+DEFAULT_MODEL: Final[str] = os.environ.get("DEFAULT_MODEL") or "default"
 # 訂閱方案：決定高階模型（Opus/Fable/Mythos）是否自動拿到 1M context。
 # 填 max 或 team 才會要 1M；填錯或留空就走預設 context，不會壞掉只是拿不到。
 ACCOUNT_PLAN: Final[str] = (os.environ.get("BUTLER_PLAN") or "").strip().lower()
-FALLBACK_MODEL: Final[str] = "claude-sonnet-4-6"      # 主模型過載時的備援
+FALLBACK_MODEL: Final[str] = "sonnet"   # 主模型過載時的備援（官方別名＝最新的 Sonnet）
 DEFAULT_EFFORT: Final[str] = os.environ.get("DEFAULT_EFFORT") or "medium"
 MAX_BUFFER_SIZE: Final[int] = 64 * 1024 * 1024        # stream-json 解析 buffer 上限
 

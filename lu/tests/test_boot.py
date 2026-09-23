@@ -1,4 +1,4 @@
-"""接線乾跑：不連 Discord、不碰正式資料，確認陸真的掛在引擎上。
+"""接線乾跑：不連 Discord、不碰正式資料，確認 lu 真的掛在引擎上。
 
 這支測試存在的理由是「靜默錯誤」：資料目錄指錯只會讓兩個前端共用一份 session、
 profile 沒註冊只會套到引擎的預設 prompt、append 帶換行只會讓 CLI 卡 60 秒——
@@ -39,7 +39,7 @@ def _settings(tmp: Path) -> object:
             "LU_DATA_DIR": str(tmp / "data"),
             "BOT_LANG": "zh-TW",
             "BUTLER_CWD": str(tmp),
-            # 引擎才讀得懂的鍵，陸只負責原樣轉交（見 settings.ENGINE_ENV_KEYS）
+            # 引擎才讀得懂的鍵，lu 只負責原樣轉交（見 settings.ENGINE_ENV_KEYS）
             "DEFAULT_MODEL": "claude-haiku-4-5",
         },
     )
@@ -67,7 +67,7 @@ def main() -> int:
         from lu.bootstrap import build, prepare
         prepare(st)
         import config  # noqa: PLC0415 — 一定要在 prepare 之後
-        check("引擎的資料目錄是陸的", Path(config.DATA_DIR) == st.data_dir,
+        check("引擎的資料目錄是 lu 的", Path(config.DATA_DIR) == st.data_dir,
               f"{config.DATA_DIR}")
         # .env 寫給引擎的鍵沒轉過去的話，這裡會是引擎的預設值而且完全不報錯
         check("引擎讀得到 .env 的 DEFAULT_MODEL",
@@ -80,7 +80,7 @@ def main() -> int:
         print("\n[profile]")
         from engine import profiles
         p = profiles.resolve("dc:123")
-        check("dc: 前綴解析成陸", p.name == "lu", p.name)
+        check("dc: 前綴解析成 lu", p.name == "lu", p.name)
         check("append 一個換行都沒有", "\n" not in p.append,
               f"{p.append.count(chr(10))} 個換行")
         check("append 不是空的", len(p.append) > 200, f"{len(p.append)} 字")
@@ -102,7 +102,7 @@ def main() -> int:
         print("\n[前端與對話 id]")
         from lu.profile import channel_id, conv_id
         check("頻道 id ⇄ 對話 id", conv_id(555) == "dc:555" and channel_id("dc:555") == 555)
-        check("不是陸的對話回 None", channel_id("main") is None)
+        check("不是 lu 的對話回 None", channel_id("main") is None)
         check("同一條對話拿到同一個前端", ctx.frontend_for("dc:123") is fe)
 
     print(f"\n{'全部通過' if not FAILED else '失敗：' + ', '.join(FAILED)}")

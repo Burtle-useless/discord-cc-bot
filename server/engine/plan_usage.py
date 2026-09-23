@@ -14,13 +14,11 @@ total_cost_usd 是按 API 計價回報的，吃訂閱時它給不出有意義的
 """
 from __future__ import annotations
 
-import json
 import time
-import urllib.request
-from pathlib import Path
 from typing import Any
 
-CREDENTIALS = Path.home() / ".claude" / ".credentials.json"
+from . import oauth_api
+
 ENDPOINT = "https://api.anthropic.com/api/oauth/usage"
 
 # 額度不會秒變，而且這是每次打開設定頁都會呼叫的端點——快取一分鐘，
@@ -47,23 +45,9 @@ BUCKETS: list[tuple[str, str]] = [
 
 
 def _fetch() -> dict | None:
-    """打官方端點拿原始回應。任何一步出錯都回 None。"""
-    try:
-        creds = json.loads(CREDENTIALS.read_text(encoding="utf-8"))
-        token = creds["claudeAiOauth"]["accessToken"]
-        req = urllib.request.Request(
-            ENDPOINT,
-            headers={
-                "Authorization": f"Bearer {token}",
-                "anthropic-beta": "oauth-2025-04-20",
-                "User-Agent": "claude-code/2.1.143",
-                "Content-Type": "application/json",
-            },
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return json.loads(resp.read())
-    except Exception:
-        return None
+    """打官方端點拿原始回應。任何一步出錯都回 None（見 oauth_api）。"""
+    data = oauth_api.get_json(ENDPOINT)
+    return data if isinstance(data, dict) else None
 
 
 def limits() -> list[dict]:

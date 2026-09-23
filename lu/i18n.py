@@ -187,6 +187,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "err_startup": "📁 Claude Code failed to start (usually a missing working directory). Use /cd and retry.",
         "err_timeout": "⏱️ No output for too long; this turn was aborted. Retry, or split the task.",
         "err_init_timeout": "⏱️ Claude Code initialization hung. I'll spawn a fresh one; send it again.",
+        "err_model_needs_update": "⚠️ This model needs a newer Claude Code. Switch to another one with /model for now. To update: stop the bot, run `pip install -U claude-agent-sdk` in its virtualenv, then start it again.",
         "err_unknown": "❌ Something went wrong.",
         "err_stopped": "🛑 Stopped",
         "err_raw_block": "\n```\n[{kind}] {raw}\n```",
@@ -241,8 +242,14 @@ _STRINGS: dict[str, dict[str, str]] = {
         "model_panel_effort_na": "-# This model has no thinking effort setting",
         "model_panel_source": "-# List source: {src}",
         "model_follow_default": "Follow account default",
+        "model_official_default": "Anthropic's recommended model",
+        "model_official_default_desc": "Currently {model}",
         "effort_default_opt": "Default",
         "model_unknown": "❌ Unknown model: `{model}`",
+        "model_needs_update_desc": "Needs a Claude Code update to use",
+        "model_needs_update_desc_ver": "Needs Claude Code {ver} or newer",
+        "model_needs_update": "⚠️ `{model}` — {need}; not applied. {how}",
+        "model_update_how": "To update: stop the bot, run `pip install -U claude-agent-sdk` in its virtualenv, then start it again.",
         "cmd_sessions_desc": "Adopt a Claude Code session from this computer (opens a new channel)",
         "sessions_q_desc": "Keyword (matches title and working directory)",
         "sessions_header": "🖥️ **Claude Code sessions on this computer**　page {page}",
@@ -312,7 +319,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "guide_sessions": (
             "📖 **Conversations**\n"
             "\n"
-            "**Adopt a session from the computer**: `/sessions` lists every Claude Code conversation on this machine (terminal and desktop app included); picking one copies it into a new channel and continues there, leaving the original untouched. Add a keyword to filter: `/sessions maze`.\n"
+            "**Adopt a session from the computer**: `/sessions` lists every Claude Code conversation on this machine (terminal and desktop app included); picking one copies it into a new channel and continues there, leaving the original untouched. Add a keyword to filter: `/sessions report`.\n"
             "\n"
             "**Rename**: `/rename new name`; leave it empty to generate one from the content. The channel name follows (Discord allows two renames per ten minutes; if it fails, it's skipped).\n"
             "\n"
@@ -321,7 +328,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "guide_model": (
             "📖 **Model & thinking effort**\n"
             "\n"
-            "**Panel**: `/model` opens a panel only you can see, with two dropdowns (model, thinking effort) and a scope selector (this conversation / account default). The list follows the official one; new models appear when Claude Code updates.\n"
+            "**Panel**: `/model` opens a panel only you can see, with two dropdowns (model, thinking effort) and a scope selector (this conversation / account default). The list comes from Anthropic's official model list, so new models show up on release day. One that's too new for this Claude Code is still listed but marked as needing an update, and picking it doesn't apply it.\n"
             "**Shortcut**: `/effort` sets the account-default effort directly.\n"
             "**Precedence**: this conversation → account default → built-in fallback. Changes take effect on the next turn.\n"
             "**Status**: `/status` shows conversation, directory, model and the context bar.\n"
@@ -614,6 +621,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "err_startup": "📁 Claude Code 起不來，多半是工作目錄不存在；用 /cd 換一個再試。",
         "err_timeout": "⏱️ 太久沒有任何回應，這回合中止了。直接重試或把任務拆小。",
         "err_init_timeout": "⏱️ Claude Code 初始化卡住了，我重開一個，再傳一次。",
+        "err_model_needs_update": "⚠️ 這個模型要更新 Claude Code 才能用，先用 /model 換別的模型。更新方法：先停掉 bot，在它的虛擬環境裡執行 `pip install -U claude-agent-sdk`，再啟動。",
         "err_unknown": "❌ 出了點狀況。",
         "err_stopped": "🛑 已停止",
         "err_raw_block": "\n```\n[{kind}] {raw}\n```",
@@ -668,8 +676,14 @@ _STRINGS: dict[str, dict[str, str]] = {
         "model_panel_effort_na": "-# 這個模型不支援思考強度",
         "model_panel_source": "-# 清單來源：{src}",
         "model_follow_default": "跟著帳號預設",
+        "model_official_default": "官方建議",
+        "model_official_default_desc": "目前是 {model}",
         "effort_default_opt": "預設",
         "model_unknown": "❌ 不認得這個模型：`{model}`",
+        "model_needs_update_desc": "要更新 Claude Code 才能用",
+        "model_needs_update_desc_ver": "要 Claude Code {ver} 以上才能用",
+        "model_needs_update": "⚠️ `{model}` {need}，這次沒有套用。{how}",
+        "model_update_how": "更新方法：先停掉 bot，在它的虛擬環境裡執行 `pip install -U claude-agent-sdk`，再啟動。",
         "cmd_sessions_desc": "接管電腦上的 Claude Code session（開成新頻道）",
         "sessions_q_desc": "關鍵字（比對標題與工作目錄）",
         "sessions_header": "🖥️ **電腦上的 Claude Code session**　第 {page} 頁",
@@ -739,7 +753,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "guide_sessions": (
             "📖 **對話管理**\n"
             "\n"
-            "**接管電腦上的 session**：`/sessions` 列出這台電腦上所有 Claude Code 對話（含終端機與桌面 App 開的），選一個會複印成新頻道接著聊；原對話不受影響。加關鍵字可以篩：`/sessions 字母迷宮`。\n"
+            "**接管電腦上的 session**：`/sessions` 列出這台電腦上所有 Claude Code 對話（含終端機與桌面 App 開的），選一個會複印成新頻道接著聊；原對話不受影響。加關鍵字可以篩：`/sessions 報表`。\n"
             "\n"
             "**命名**：`/rename 新名字` 改標題；留空會讀內容自動生成。頻道名稱會一起改（Discord 限制十分鐘只能改兩次，改不動就先算了）。\n"
             "\n"
@@ -748,7 +762,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "guide_model": (
             "📖 **模型與思考強度**\n"
             "\n"
-            "**面板**：`/model` 開一個只有你看得到的面板，兩個下拉選單（模型、思考強度）加一個套用範圍（這個對話／帳號預設）。清單跟著官方走，Claude Code 升版有新模型會自己長出來。\n"
+            "**面板**：`/model` 開一個只有你看得到的面板，兩個下拉選單（模型、思考強度）加一個套用範圍（這個對話／帳號預設）。清單向官方要，新模型發佈當天就會出現；太新、這版 Claude Code 還跑不動的照樣列出來，標著「要更新 Claude Code 才能用」，選了不會套用。\n"
             "**捷徑**：`/effort` 直接設帳號預設的思考強度。\n"
             "**優先序**：這個對話的設定 → 帳號預設 → 內建後備。改了下一回合生效。\n"
             "**目前狀態**：`/status` 一次看對話、目錄、模型、context 用量條。\n"

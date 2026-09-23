@@ -1,11 +1,11 @@
-"""陸的進入點：`python -m lu`（上線）或 `python -m lu --check`（乾跑，不連 Discord）。
+"""lu 的進入點：`python -m lu`（上線）或 `python -m lu --check`（乾跑，不連 Discord）。
 
 啟動順序不能換：
   1. 讀 `.env`（settings，完全不碰 engine）
   2. `bootstrap.prepare()` 設好 BUTLER_DATA_DIR 等環境變數並把
      server 目錄放上 sys.path
   3. 這之後才 import 任何 engine 模組
-理由見 `bootstrap` 的模組說明——晚一步，陸就會寫進 `server/data/` 而不是自己的 `data/`。
+理由見 `bootstrap` 的模組說明——晚一步，lu 就會寫進 `server/data/` 而不是自己的 `data/`。
 """
 from __future__ import annotations
 
@@ -54,6 +54,8 @@ def build_bot(st: Settings) -> tuple[Any, Any]:
     import discord
     from discord import app_commands
 
+    from engine import models
+
     from . import intake, ledger, voice
     from .bootstrap import build
     from .commands import register_all
@@ -76,7 +78,7 @@ def build_bot(st: Settings) -> tuple[Any, Any]:
 
     @client.event
     async def on_ready() -> None:  # noqa: D401
-        log.info("陸上線：%s", client.user)
+        log.info("lu 上線：%s", client.user)
         for guild in client.guilds:
             await ctx.sidebar.ensure(guild)
         ctx.auth.entry_channel_id = ctx.sidebar.entry_id
@@ -87,6 +89,10 @@ def build_bot(st: Settings) -> tuple[Any, Any]:
             sched.start()
         # Whisper 閒置卸載：使用者的顯示卡要拿來玩遊戲，不能一直被佔著
         ctx.keep_task(asyncio.create_task(voice.reaper()))
+        # 模型清單：先把 CLI 版本問好，models.json 存的試跑結果才認得出來（catalog 只認
+        # 同一版 CLI 試出來的，版本沒問過就全當可用）；清單過期就順便更新。背景跑，不擋上線，
+        # 也不在事件迴圈裡同步開 `claude --version`
+        ctx.keep_task(asyncio.create_task(models.bootstrap()))
         n = await ctx.worker.restore_pending()
         if n:
             log.info("限流等待中的 %d 則訊息已重新排隊", n)
@@ -199,7 +205,7 @@ def check(st: Settings) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="lu", description="陸：Discord 上的 Claude Code")
+    ap = argparse.ArgumentParser(prog="lu", description="lu：Discord 上的 Claude Code")
     ap.add_argument("--check", action="store_true", help="乾跑：只驗接線，不連 Discord")
     args = ap.parse_args(argv)
 

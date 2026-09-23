@@ -36,3 +36,10 @@ _說明書/
 # Semantic /search vector cache (generated at runtime, can be tens of MB)
 session_vectors.json
 session_vectors_e5.json
+
+# 同步用的臨時腳本（比對上游、逐檔跑測試）。只擋根目錄這一層，裡面寫著本機的
+# 絕對路徑，進版控等於把那條路徑公開出去
+/_*.py
+
+# impeccable hook 的本機快取：裡面是這台機器的絕對路徑
+.impeccable/

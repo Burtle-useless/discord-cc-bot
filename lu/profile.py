@@ -1,4 +1,4 @@
-"""陸的 profile：system prompt append 與工具組，掛在 `dc:` 前綴上。
+"""lu 的 profile：system prompt append 與工具組，掛在 `dc:` 前綴上。
 
 **只能在 `bootstrap.prepare()` 之後 import**（要 `server/engine` 在 sys.path 上）。
 
@@ -20,22 +20,22 @@ CONV_PREFIX = "dc:"
 
 
 def _lu_servers(state: ConvState) -> dict:
-    """陸的工具：只有傳檔。做出來的圖表與報告要能直接上傳到頻道。
+    """lu 的工具：只有傳檔。做出來的圖表與報告要能直接上傳到頻道。
 
     傳檔工具是每個對話一份（file_tools.server_for），送出去的檔案才知道自己是從
     哪個頻道發起的（file.offer 事件據此落到正確的頻道）。行事曆／看板／位置那組
-    是手機 App 端的生活資料，陸不掛。
+    是手機 App 端的生活資料，lu 不掛。
     """
     return {file_tools.SERVER_NAME: file_tools.server_for(state.conv_id)}
 
 
 def build() -> Profile:
-    """依目前介面語言組出陸的 profile。BOT_LANG 換了要重建（啟動時做一次）。"""
+    """依目前介面語言組出 lu 的 profile。BOT_LANG 換了要重建（啟動時做一次）。"""
     return Profile(name="lu", append=t("system_prompt"), servers=_lu_servers, src_default="Discord")
 
 
 def install() -> Profile:
-    """把陸掛到 `dc:` 前綴。重複呼叫只是覆寫，無害。"""
+    """把 lu 掛到 `dc:` 前綴。重複呼叫只是覆寫，無害。"""
     p = build()
     register(CONV_PREFIX, p)
     return p
@@ -46,7 +46,7 @@ def conv_id(channel_id: int) -> str:
 
 
 def channel_id(conv: str) -> int | None:
-    """`dc:<id>` → id；不是陸的對話回 None。"""
+    """`dc:<id>` → id；不是 lu 的對話回 None。"""
     if not conv.startswith(CONV_PREFIX):
         return None
     tail = conv[len(CONV_PREFIX):]

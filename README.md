@@ -158,8 +158,9 @@ The clone already includes the engine (`server/`) — there is no second repo to
 fetch and nothing to point at. See [Architecture](#architecture) if you want to
 know what lives where.
 
-> **Model & context:** by default the bot uses standard 200K context
-> (`claude-sonnet-4-6`), which works on every plan with no usage credits. Tell
+> **Model & context:** by default the bot uses `default`, Claude Code's own alias
+> for the model it currently recommends for your account, so it moves to newer
+> models without any config change. Tell
 > the bot your plan with `/plan` and it applies Anthropic's official rule: on
 > **Max / Team / Enterprise**, Opus automatically gets the 1M context window with
 > no extra setup. For every other case (Sonnet on any plan, or Opus on Pro), opt
@@ -239,6 +240,15 @@ virtualenv (the core deps rarely move; optional extras like voice are opt-in).
 Then restart the bot. There's no auto-update, so pull whenever you want the
 latest.
 
+**New models need no update of this repo.** The `/model` list comes from
+Anthropic's official model list, so a new model shows up on release day. It
+often needs a newer Claude Code than the one bundled with your installed
+`claude-agent-sdk`, though; until you update, `/model` still lists it but marks
+it as needing an update and won't apply it. To update: stop the bot, run
+`pip install -U claude-agent-sdk` inside the virtualenv, then start the bot
+again. Stop it first — Windows won't let pip overwrite the `claude.exe` a running
+bot is using, and the install fails halfway.
+
 ---
 
 ## Commands
@@ -295,7 +305,7 @@ use to you if you're away from the machine. Set `SHARE_SCRIPT` in `.env` to a
 PowerShell script and the bot will instead hand back a temporary download link:
 
 ```
-SHARE_SCRIPT=C:\path\to\share.ps1
+SHARE_SCRIPT=C:\path\to\upload-link.ps1
 SHARE_HOURS=24
 ```
 
@@ -366,6 +376,9 @@ drive_core.py, wt_core.py    Optional standalone modules (voice, git worktrees).
 `server/` is a **complete copy that ships with this repo** — clone and it works.
 Nothing external to install or point at. The same engine also drives a phone-app
 front-end the author maintains separately; this repo does not depend on it.
+The `server/` files are kept identical to that copy, so some comments mention the
+phone app or its endpoints (`system_api`, the in-app SDK updater, `PEER_RESTART`).
+Those parts are simply unused here.
 
 Two rules the code relies on, both of which fail *silently* if broken:
 

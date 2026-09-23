@@ -1,6 +1,6 @@
 """跟這台電腦有關的指令：/usage、/screenshot、/plan。
 
-用量與截圖直接用 `server/` 的 engine／transport 模組，陸這邊只負責畫成 Discord 訊息：
+用量與截圖直接用 `server/` 的 engine／transport 模組，lu 這邊只負責畫成 Discord 訊息：
   engine.plan_usage  訂閱方案的額度（5 小時／7 天視窗），走官方 API
   engine.local_usage 逐字稿算出來的本機用量（今日／本月／逐日）
   transport.tools.screenshot  抓螢幕

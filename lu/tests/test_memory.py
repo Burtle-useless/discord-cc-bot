@@ -72,18 +72,18 @@ def test_literal() -> None:
         root = Path(d)
         jf = root / "abc123.jsonl"
         rec = {"type": "user", "timestamp": "2026-09-01T00:00:00Z",
-               "message": {"content": [{"type": "text", "text": "關於防跌預警系統的感測器"}]}}
+               "message": {"content": [{"type": "text", "text": "關於溫濕度感測器的接線"}]}}
         jf.write_text(json.dumps(rec, ensure_ascii=False), encoding="utf-8")
         files = {"abc123": jf}
-        hits = semantic.literal("防跌預警", files, 10)
+        hits = semantic.literal("溫濕度感測器", files, 10)
         check("命中一筆", len(hits) == 1, str(hits))
-        check("摘要含關鍵字", "防跌預警" in hits[0]["snippet"], hits[0]["snippet"])
+        check("摘要含關鍵字", "溫濕度感測器" in hits[0]["snippet"], hits[0]["snippet"])
         check("帶得出 session_id", hits[0]["session_id"] == "abc123")
         check("沒命中就空", semantic.literal("完全不相關的字", files, 10) == [])
         check("空查詢回空", semantic.literal("  ", files, 10) == [])
         # 檔案被刪掉不能炸
         jf.unlink()
-        check("檔沒了不炸", semantic.literal("防跌預警", files, 10) == [])
+        check("檔沒了不炸", semantic.literal("溫濕度感測器", files, 10) == [])
 
 
 def test_fallback() -> None:

@@ -1,6 +1,6 @@
-"""陸：cc-bot 的骨架——Discord transport，引擎是 repo 自帶的 `server/engine`／`server/protocol`。
+"""lu：cc-bot 的骨架——Discord transport，引擎是 repo 自帶的 `server/engine`／`server/protocol`。
 
-**「陸」（lu）只是內部代號**，用來在原始碼與 log 裡指稱這一版。
+**`lu` 只是內部代號**，用來在原始碼與 log 裡指稱這一版。
 使用者看得到的字串一律不出現它：bot 對外就是 Claude Code／CC，也不自我介紹。
 `lu/i18n.py` 裡沒有任何一處提到它，改文案時請維持這條。
 

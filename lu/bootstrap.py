@@ -1,8 +1,8 @@
-"""把陸接到引擎上：環境變數、sys.path、profile、ports、Worker、BotContext。
+"""把 lu 接到引擎上：環境變數、sys.path、profile、ports、Worker、BotContext。
 
 **呼叫順序是這個模組存在的唯一理由。** `prepare()` 必須在 import 任何 engine 模組
 之前跑完——`server/config.py` 在 import 當下就把 `DATA_DIR` 算好凍成常數，晚一步
-設 `BUTLER_DATA_DIR`，陸就會把對話寫進 `server/data/`（引擎自己的預設位置）而不是
+設 `BUTLER_DATA_DIR`，lu 就會把對話寫進 `server/data/`（引擎自己的預設位置）而不是
 repo 根目錄的 `data/`。所以這裡的 engine import 全部是**函式內 import**，模組頂端一個都沒有。
 
 `build()` 之後才有 `BotContext`：指令、側欄、前端都從它拿東西，測試也塞得進假的。
@@ -59,7 +59,7 @@ def _check_engine() -> None:
     want = os.environ.get("BUTLER_DATA_DIR", "")
     if want and Path(config.DATA_DIR) != Path(want):
         raise RuntimeError(
-            f"引擎的資料目錄是 {config.DATA_DIR}，不是陸的 {want}——"
+            f"引擎的資料目錄是 {config.DATA_DIR}，不是 lu 的 {want}——"
             "prepare() 一定要在 import engine 之前跑（見 bootstrap 模組說明）",
         )
 
@@ -161,7 +161,7 @@ class BotContext:
 
 
 async def _no_locate() -> dict[str, Any] | None:
-    """陸沒有手機可以問位置。回 None＝「拿不到」，工具那邊會照這條路回答。"""
+    """lu 沒有手機可以問位置。回 None＝「拿不到」，工具那邊會照這條路回答。"""
     return None
 
 

@@ -37,6 +37,10 @@ def classify(err: str) -> ErrKind:
     無關的訊息裡，先前就這樣被歸成 INIT_TIMEOUT、白白丟掉 client。
     """
     s = (err or "").lower()
+    # 後端擋太舊的 CLI：「Claude Code 2.1.259 does not support this model; version 2.1.280
+    # or newer is required」。它也是 400，要排在底下那些 400 的判斷前面
+    if "does not support this model" in s:
+        return "MODEL_NEEDS_UPDATE"
     if "exceeded maximum buffer size" in s or "failed to decode json" in s:
         return "INPUT_TOO_LARGE"
     # context 爆掉會清 session（見 RESET_SESSION），誤判的代價是整條對話失憶，
@@ -92,6 +96,7 @@ USER_FACING: dict[str, str] = {
     "INIT_TIMEOUT": "Claude Code 初始化卡住了，我重開一個試試。",
     "MAX_TURNS": "這一輪做了太多步，先停在這裡。要我接著做就說一聲。",
     "EXEC_ERROR": "這一輪跑到一半出錯了。",
+    "MODEL_NEEDS_UPDATE": "這個模型要更新 Claude Code 才能用。到工具頁按更新，或先換別的模型。",
     "UNKNOWN": "出了點狀況。",
 }
 
