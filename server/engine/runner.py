@@ -488,6 +488,13 @@ async def run_turn(
                         # 標了 is_error，這一輪的文字都不是助理要說的話。**不在這裡 raise**：
                         # 外層 except 會把 client 丟掉，而額度用盡時進程好端端的，
                         # 丟掉只是多付一次啟動、還把背景工作一起殺了。記下來到迴圈外拋。
+                        # 例外：ASK 硬擋是我們自己送的 interrupt，CLI 被打斷時收出的就是
+                        # error_during_execution。那是預期中的收尾，不是故障——當成失敗
+                        # 的話，這一輪寫好的回覆與選項卡會整個被丟掉。
+                        if (message.is_error and not limit_hit[0] and ask_interrupted[0]
+                                and message.subtype == "error_during_execution"):
+                            messages.pop()   # 這則 Result 沒有要說的話，別折進回覆
+                            break
                         if limit_hit[0] or message.is_error:
                             text = (message.result or "").strip()
                             kind = "RATE_LIMIT" if limit_hit[0] else classify(text or message.subtype)
@@ -513,6 +520,13 @@ async def run_turn(
                         # 開觀察窗把那個孤兒週期整段讀回來、折進同一個回覆
                         # （多則插話多開幾輪；已被吃掉的份最後只多付一個靜默窗）。
                         # 進入收尾就不再接受新插話——之後的訊息走排隊。
+                        #
+                        # 週期正常收完＝上一步的 [[ASK:]] 已經停下來了，旗標要歸零。
+                        # 不歸零的話，觀察窗裡那個在回插話的孤兒週期會被主迴圈當成
+                        # 「問完還在往下做」而 interrupt，收出 error_during_execution，
+                        # 整個回合判失敗（2026-10-10 實錄）。
+                        # 孤兒週期自己又打了 ASK 的話，_commit_step 會再把它立起來。
+                        ask_pending[0] = False
                         orphan_watch += _steered.pop(conv, 0)
                         if orphan_watch > 0:
                             _steerable.pop(conv, None)
