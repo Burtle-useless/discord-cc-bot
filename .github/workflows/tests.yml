@@ -33,3 +33,24 @@ jobs:
           python lu/tests/test_filemark.py
           python lu/tests/test_model.py
           python test_wt_core.py
+
+  macos:
+    # 真的在 Mac 上把 setup.sh 跑一遍（CI 模式：不碰 Discord、不登入、不裝服務），
+    # 驗 uv 裝 Python、套件、HTTPS 憑證、SDK 自帶的 CLI、乾跑檢查，再用它建的環境跑測試
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: setup.sh
+        run: SETUP_CI=1 ./setup.sh
+      - name: Run tests
+        run: |
+          PY=.venv/bin/python
+          $PY lu/tests/test_boot.py
+          $PY lu/tests/test_frontend.py
+          $PY lu/tests/test_memory.py
+          $PY lu/tests/test_migrate.py
+          $PY lu/tests/test_render.py
+          $PY lu/tests/test_schedule.py
+          $PY lu/tests/test_filemark.py
+          $PY lu/tests/test_model.py
+          $PY test_wt_core.py

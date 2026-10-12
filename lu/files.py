@@ -11,6 +11,7 @@ import logging
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +25,7 @@ log = logging.getLogger(__name__)
 DEFAULT_UPLOAD_LIMIT = 10 * 1024 * 1024
 
 # ── 超過上限的檔案改走臨時下載連結（選填功能）───────────────────────────────
-# SHARE_SCRIPT 指向一支 PowerShell 腳本，介面必須是
+# SHARE_SCRIPT 指向一支腳本（.ps1 或可直接執行的 .sh），介面必須是
 #     <script> <檔案路徑> -As <輸出檔名> -Hours <時數>
 # 並把下載網址印到 stdout（例如用 cloudflared 之類的工具開臨時通道）。
 # **沒設就整個停用**，大檔只回報名稱與本機路徑——絕不去執行一支不存在的腳本。
@@ -52,10 +53,14 @@ def share_file_sync(fp: Path) -> str:
     script = Path(SHARE_SCRIPT)
     if not SHARE_SCRIPT or not script.exists():
         raise FileNotFoundError(f"找不到分享腳本 {SHARE_SCRIPT or '(未設定 SHARE_SCRIPT)'}")
+    if script.suffix.lower() != ".ps1":
+        head = [str(script)]   # .sh 之類直接執行（要 chmod +x 並有 shebang）
+    elif sys.platform == "win32":
+        head = ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)]
+    else:
+        head = ["pwsh", "-NoProfile", "-File", str(script)]   # macOS：brew install powershell
     proc = subprocess.run(
-        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
-         "-File", str(script), str(fp),
-         "-As", ascii_name(fp), "-Hours", str(SHARE_HOURS)],
+        [*head, str(fp), "-As", ascii_name(fp), "-Hours", str(SHARE_HOURS)],
         capture_output=True, timeout=120,
     )
     # 刻意不解碼全文：PowerShell 的非英文輸出在管道裡是系統編碼（中文 Windows 是

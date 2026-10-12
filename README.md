@@ -1,7 +1,7 @@
 # Discord CC Bot
 
 Control [Claude Code](https://docs.claude.com/en/docs/claude-code) on your
-Windows PC from Discord. Send a message in a Discord channel and the bot runs
+Windows PC or Mac from Discord. Send a message in a Discord channel and the bot runs
 it through the Claude Code CLI on your machine — editing files, running
 commands, searching the web, and more — then streams the result back to you.
 
@@ -103,7 +103,10 @@ work happens by default.
 
 ## Prerequisites
 
-1. **Windows** (this build is Windows-only).
+1. **Windows**. On a **Mac**, skip this whole section and the Setup below —
+   run `./setup.sh` instead; it installs everything and only stops where you
+   have to act (create the bot, paste its token, sign in to Claude). Details in
+   [README_mac.md](README_mac.md).
 2. **Python 3.10+**.
 3. **Node.js** and the **Claude Code CLI**, installed and signed in:
    ```

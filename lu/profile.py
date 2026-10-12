@@ -2,12 +2,14 @@
 
 **只能在 `bootstrap.prepare()` 之後 import**（要 `server/engine` 在 sys.path 上）。
 
-append 從 i18n 的 `system_prompt` 來，**一個換行都不能有**——含換行會讓 CLI 的
+append 從 i18n 的 `system_prompt` 來（macOS 用 `system_prompt_mac`），**一個換行都不能有**——含換行會讓 CLI 的
 initialize 握手卡 60 秒（見 `server/engine/options.py`）。這裡刻意不做 sanitize：
 `build_options` 會再過一次，但靠它等於把炸彈留給下一個改文案的人；
 tests/test_boot.py 直接對原文釘死。
 """
 from __future__ import annotations
+
+import sys
 
 from engine import file_tools
 from engine.profiles import Profile, register
@@ -31,7 +33,8 @@ def _lu_servers(state: ConvState) -> dict:
 
 def build() -> Profile:
     """依目前介面語言組出 lu 的 profile。BOT_LANG 換了要重建（啟動時做一次）。"""
-    return Profile(name="lu", append=t("system_prompt"), servers=_lu_servers, src_default="Discord")
+    key = "system_prompt_mac" if sys.platform == "darwin" else "system_prompt"
+    return Profile(name="lu", append=t(key), servers=_lu_servers, src_default="Discord")
 
 
 def install() -> Profile:
