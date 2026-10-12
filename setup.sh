@@ -39,9 +39,18 @@ PKGS=$(grep -E '^(discord\.py|claude-agent-sdk|Pillow|croniter)' requirements.tx
 uv pip install --python "$PY" $PKGS || die "套件安裝失敗，把上面的錯誤訊息整段留著求助"
 ok "套件裝好了"
 
-# 這個 Python 連不連得上 HTTPS（bot 連 Discord 靠它）
-if ! "$PY" -c "import urllib.request; urllib.request.urlopen('https://discord.com/api/v10/gateway', timeout=15)" 2>/dev/null; then
-    die "Python 連不上 https://discord.com（網路不通，或憑證驗證失敗）。確認網路後重跑；仍失敗請回報這行訊息"
+# 這個 Python 的 TLS 憑證驗證能不能用（bot 連 Discord 靠它）。
+# 收到任何 HTTP 回應就代表握手成功——Discord 前面的 Cloudflare 會對 Python 預設的 User-Agent 回 403
+if ! ERR=$("$PY" - 2>&1 <<'PYEOF'
+import urllib.error, urllib.request
+try:
+    urllib.request.urlopen("https://discord.com/api/v10/gateway", timeout=15)
+except urllib.error.HTTPError:
+    pass
+PYEOF
+); then
+    printf '%s\n' "$ERR" | tail -n 3
+    die "Python 連不上 https://discord.com（網路不通，或憑證驗證失敗）。確認網路後重跑；仍失敗請回報上面的錯誤"
 fi
 ok "HTTPS 連線正常"
 
